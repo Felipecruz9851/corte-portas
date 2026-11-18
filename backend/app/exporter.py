@@ -1,10 +1,10 @@
-"""Exportação de itens construtivos e plano de corte para XLSX, CSV e JSON."""
+"""Exportação de itens construtivos, corte de perfis e corte de vidros para XLSX, CSV e JSON."""
 
 from __future__ import annotations
 
 import io
 import json
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 import pandas as pd
 from openpyxl.styles import Alignment, Font, PatternFill
@@ -15,6 +15,8 @@ def _flatten_items_for_table(items: List[Dict[str, Any]]) -> List[Dict[str, Any]
     rows: List[Dict[str, Any]] = []
     for it in items:
         divs = it.get("divisorias_mm") or []
+        vidros = it.get("vidros_corte") or []
+        v0 = vidros[0] if vidros else {}
         rows.append(
             {
                 "OP": it.get("op"),
@@ -34,6 +36,8 @@ def _flatten_items_for_table(items: List[Dict[str, Any]]) -> List[Dict[str, Any]
                 "Largura_mm": it.get("largura_mm"),
                 "Altura_mm": it.get("altura_mm"),
                 "Linear_mm": it.get("medida_linear_mm"),
+                "Vidro_Largura_Corte_mm": v0.get("largura_corte_mm"),
+                "Vidro_Altura_Corte_mm": v0.get("altura_corte_mm"),
                 "Lado": it.get("lado"),
                 "Folha": it.get("posicao_folha"),
                 "Tem_Puxador": "Sim" if it.get("tem_puxador") else "Não",
@@ -59,17 +63,23 @@ def export_to_xlsx_bytes(
     items: List[Dict[str, Any]],
     detailed_bars: List[Dict[str, Any]],
     grouped_bars: List[Dict[str, Any]],
+    detailed_glasses: Optional[List[Dict[str, Any]]] = None,
+    grouped_glasses: Optional[List[Dict[str, Any]]] = None,
 ) -> bytes:
     """Gera pasta de trabalho Excel multi-abas formatada em memória."""
     df_items = pd.DataFrame(_flatten_items_for_table(items))
     df_bars = pd.DataFrame(detailed_bars)
     df_grouped = pd.DataFrame(grouped_bars)
+    df_glass_det = pd.DataFrame(detailed_glasses or [])
+    df_glass_grp = pd.DataFrame(grouped_glasses or [])
 
     buffer = io.BytesIO()
     with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
         df_items.to_excel(writer, sheet_name="Itens_Construcao", index=False)
         df_bars.to_excel(writer, sheet_name="Lista_Corte_Barras", index=False)
         df_grouped.to_excel(writer, sheet_name="Resumo_Corte_Serra", index=False)
+        df_glass_det.to_excel(writer, sheet_name="Lista_Corte_Vidros", index=False)
+        df_glass_grp.to_excel(writer, sheet_name="Resumo_Corte_Vidros", index=False)
 
         wb = writer.book
         header_fill = PatternFill(
@@ -102,11 +112,14 @@ def export_to_xlsx_bytes(
 def export_to_csv_bytes(
     items: List[Dict[str, Any]],
     grouped_bars: List[Dict[str, Any]],
+    grouped_glasses: Optional[List[Dict[str, Any]]] = None,
     mode: str = "items",
 ) -> bytes:
-    """Exporta itens ou resumo de corte em CSV (; UTF-8 BOM para Excel PT-BR)."""
+    """Exporta itens, resumo de corte de barras ou resumo de vidros em CSV (; UTF-8 BOM)."""
     if mode == "corte":
         df = pd.DataFrame(grouped_bars)
+    elif mode == "vidro":
+        df = pd.DataFrame(grouped_glasses or [])
     else:
         df = pd.DataFrame(_flatten_items_for_table(items))
 
@@ -120,6 +133,8 @@ def export_to_json_bytes(
     items: List[Dict[str, Any]],
     detailed_bars: List[Dict[str, Any]],
     grouped_bars: List[Dict[str, Any]],
+    detailed_glasses: Optional[List[Dict[str, Any]]] = None,
+    grouped_glasses: Optional[List[Dict[str, Any]]] = None,
 ) -> bytes:
     payload = {
         "meta": meta,
@@ -127,5 +142,7 @@ def export_to_json_bytes(
         "items": items,
         "corte_detalhado": detailed_bars,
         "corte_agrupado": grouped_bars,
+        "vidro_detalhado": detailed_glasses or [],
+        "vidro_agrupado": grouped_glasses or [],
     }
     return json.dumps(payload, indent=2, ensure_ascii=False).encode("utf-8")

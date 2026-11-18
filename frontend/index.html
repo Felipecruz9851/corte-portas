@@ -20,6 +20,7 @@
       <button type="button" class="btn btn-secondary" id="btn-export-xlsx" disabled>Exportar Excel (.xlsx)</button>
       <button type="button" class="btn btn-secondary" id="btn-export-csv-items" disabled>CSV Itens</button>
       <button type="button" class="btn btn-secondary" id="btn-export-csv-corte" disabled>CSV Corte Serra</button>
+      <button type="button" class="btn btn-secondary" id="btn-export-csv-vidro" disabled>CSV Corte Vidros</button>
       <button type="button" class="btn btn-secondary" id="btn-export-json" disabled>JSON</button>
     </div>
   </header>
@@ -113,6 +114,11 @@
         <span class="kpi-sub" id="kpi-metros">0 m lineares</span>
       </article>
       <article class="kpi-card">
+        <span class="kpi-label">Vidros / Placas</span>
+        <strong class="kpi-value" id="kpi-vidros">0</strong>
+        <span class="kpi-sub" id="kpi-area-vidros">0 m²</span>
+      </article>
+      <article class="kpi-card">
         <span class="kpi-label">Puxadores</span>
         <strong class="kpi-value" id="kpi-puxadores">0</strong>
         <span class="kpi-sub" id="kpi-itens-pux">0 itens com puxador</span>
@@ -129,6 +135,7 @@
         <div class="tablist" focusgroup="tablist nomemory" role="tablist" aria-label="Visões do sistema">
           <button type="button" role="tab" id="tab-itens" aria-selected="true" focusgroupstart>Construção das Peças</button>
           <button type="button" role="tab" id="tab-corte" aria-selected="false">Plano de Corte de Barras</button>
+          <button type="button" role="tab" id="tab-vidros" aria-selected="false">Plano de Corte de Vidros</button>
           <button type="button" role="tab" id="tab-regras" aria-selected="false">Regras e Descontos (mm)</button>
         </div>
 
@@ -241,13 +248,47 @@
           </div>
         </div>
 
-        <!-- TAB 3: REGRAS -->
+        <!-- TAB 3: VIDROS -->
+        <div role="tabpanel" id="panel-vidros" aria-labelledby="tab-vidros" hidden="until-found">
+          <div class="tabpanel-inner">
+            <div class="corte-toolbar">
+              <fieldset class="view-switch">
+                <legend class="visually-hidden">Modo de visualização do corte de vidros</legend>
+                <input type="radio" id="vidro-agrupado" name="vidro_view" value="agrupado" checked>
+                <label for="vidro-agrupado">Lista Agrupada por Medida</label>
+                <input type="radio" id="vidro-detalhado" name="vidro_view" value="detalhado">
+                <label for="vidro-detalhado">Lista Detalhada por OP</label>
+              </fieldset>
+              <div class="field field-sm">
+                <label for="f-vidro-modelo">Filtrar Modelo</label>
+                <select id="f-vidro-modelo">
+                  <option value="">Todos</option>
+                </select>
+              </div>
+              <span id="vidro-count-label" class="table-meta-inline">0 linhas</span>
+            </div>
+
+            <div tabindex="0" role="region" aria-labelledby="caption-vidros" class="table-wrapper">
+              <table id="vidros-table">
+                <caption id="caption-vidros" class="visually-hidden">Lista de corte de vidros e placas por modelo</caption>
+                <thead id="vidros-thead"></thead>
+                <tbody id="vidros-tbody">
+                  <tr>
+                    <td colspan="10" class="empty-cell">Nenhum plano de corte de vidros calculado.</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+
+        <!-- TAB 4: REGRAS -->
         <div role="tabpanel" id="panel-regras" aria-labelledby="tab-regras" hidden="until-found">
           <div class="tabpanel-inner">
             <div class="rules-header">
               <div>
                 <h3>Regras de Corte e Descontos por Modelo (mm)</h3>
-                <p class="hint-text">Quando o perfil do puxador for mais largo que o perfil do quadro (ex.: Clear G = 80 mm vs 45 mm), o sistema calcula o desconto de adjacência (35 mm) e aplica automaticamente apenas às barras perpendiculares ao(s) puxador(es).</p>
+                <p class="hint-text">Perfis: quando o puxador for mais largo que o quadro (ex.: Clear G = 80 vs 45 mm), desconta a diferença (35 mm) das barras adjacentes ao puxador. Vidros: informe o desconto por lado sem puxador (Lateral) e por lado com puxador (Puxador).</p>
               </div>
               <div class="rules-actions">
                 <button type="button" class="btn btn-secondary" id="btn-reset-rules">Restaurar Padrão</button>
@@ -269,6 +310,8 @@
                     <th>Desc. Fixo Vert. (mm)</th>
                     <th>Desc. Fixo Horiz. (mm)</th>
                     <th>Desc. Fixo Div. (mm)</th>
+                    <th>Vidro: Desc. Lateral (mm/lado)</th>
+                    <th>Vidro: Desc. Puxador (mm/lado)</th>
                     <th>Observação</th>
                   </tr>
                 </thead>
@@ -316,6 +359,22 @@
               </tr>
             </thead>
             <tbody id="detail-bars-tbody"></tbody>
+          </table>
+        </div>
+
+        <h3>Vidro / Placa para Corte</h3>
+        <div class="mini-table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Acabamento</th>
+                <th>Qtd</th>
+                <th>Larg. Corte</th>
+                <th>Alt. Corte</th>
+                <th>Descontos (L / A)</th>
+              </tr>
+            </thead>
+            <tbody id="detail-glass-tbody"></tbody>
           </table>
         </div>
 

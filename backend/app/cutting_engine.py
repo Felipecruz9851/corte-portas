@@ -24,10 +24,47 @@ class CuttingRule:
     largura_perfil_quadro_mm: float = 0.0
     largura_perfil_puxador_mm: float = 0.0
     desconto_adjacente_puxador_mm: float = 0.0
+    desconto_vidro_lateral_mm: float = 0.0
+    desconto_vidro_puxador_mm: float = 0.0
     observacao: str = ""
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
+
+
+@dataclass
+class CutGlass:
+    """Representa uma peça/lote de vidro/placa a cortar para uma OP."""
+
+    op: str
+    codigo: str
+    pedido: str
+    data_entrega: str
+    categoria: str
+    modelo: str
+    acabamento_placa: str
+    posicao_puxador: str
+    qtd_pecas: int
+    largura_nominal_mm: float
+    desconto_largura_mm: float
+    largura_corte_mm: float
+    regra_largura: str
+    altura_nominal_mm: float
+    desconto_altura_mm: float
+    altura_corte_mm: float
+    regra_altura: str
+
+    @property
+    def area_m2(self) -> float:
+        return round(
+            (self.qtd_pecas * self.largura_corte_mm * self.altura_corte_mm) / 1_000_000.0,
+            4,
+        )
+
+    def to_dict(self) -> Dict[str, Any]:
+        data = asdict(self)
+        data["area_m2"] = self.area_m2
+        return data
 
 
 @dataclass
@@ -399,9 +436,171 @@ def build_cutting_plan(
     return [b.to_dict() for b in detailed_bars], summary_list
 
 
+def compute_item_glasses(
+    item: ExtractedItem, rules: Dict[str, CuttingRule]
+) -> List[CutGlass]:
+    """Calcula a(s) medida(s) de corte do vidro/placa com base nos descontos por lado."""
+    if item.categoria == "LINHA ALLU" or item.eh_barra_avulsa:
+        return []
+
+    largura_nom = item.largura_mm or 0.0
+    altura_nom = item.altura_mm or 0.0
+    if largura_nom <= 0 or altura_nom <= 0:
+        return []
+
+    rule = rules.get(item.modelo) or rules["OUTRO"]
+    op_qty = _qty_int(item)
+    lat = rule.desconto_vidro_lateral_mm
+    pux = rule.desconto_vidro_puxador_mm
+    acabamento = item.acabamento_placa or "NAO ESPECIFICADO"
+
+    # Caso especial: Prateleira / Tampo Visor sem desconto configurado usa vidro explícito se houver
+    if (
+        item.categoria == "PRATELEIRA / TAMPO VISOR"
+        and lat == 0.0
+        and pux == 0.0
+        and item.vidro_largura_mm
+        and item.vidro_profundidade_mm
+    ):
+        desc_l = round(max(0.0, largura_nom - item.vidro_largura_mm), 3)
+        desc_a = round(max(0.0, altura_nom - item.vidro_profundidade_mm), 3)
+        return [
+            CutGlass(
+                op=item.op,
+                codigo=item.codigo,
+                pedido=item.pedido,
+                data_entrega=item.data_entrega,
+                categoria=item.categoria,
+                modelo=item.modelo,
+                acabamento_placa=acabamento,
+                posicao_puxador=item.posicao_puxador,
+                qtd_pecas=op_qty,
+                largura_nominal_mm=round(largura_nom, 3),
+                desconto_largura_mm=desc_l,
+                largura_corte_mm=round(item.vidro_largura_mm, 3),
+                regra_largura="Explícito na descrição",
+                altura_nominal_mm=round(altura_nom, 3),
+                desconto_altura_mm=desc_a,
+                altura_corte_mm=round(item.vidro_profundidade_mm, 3),
+                regra_altura="Explícito na descrição",
+            )
+        ]
+
+    if item.qtd_puxadores == 0:
+        desc_l = round(2.0 * lat, 3)
+        desc_a = round(2.0 * lat, 3)
+        regra_l = "2x Lateral"
+        regra_a = "2x Lateral"
+    elif item.posicao_puxador in ("SUPERIOR", "HORIZONTAL (BASCULA/GAVETA)"):
+        desc_l = round(2.0 * lat, 3)
+        desc_a = round(pux + lat, 3)
+        regra_l = "2x Lateral"
+        regra_a = "1x Puxador + 1x Lateral"
+    elif item.qtd_puxadores == 2:
+        desc_l = round(2.0 * pux, 3)
+        desc_a = round(2.0 * lat, 3)
+        regra_l = "2x Puxador"
+        regra_a = "2x Lateral"
+    else:
+        # 1 puxador lateral (DIREITA ou ESQUERDA)
+        desc_l = round(pux + lat, 3)
+        desc_a = round(2.0 * lat, 3)
+        regra_l = "1x Puxador + 1x Lateral"
+        regra_a = "2x Lateral"
+
+    return [
+        CutGlass(
+            op=item.op,
+            codigo=item.codigo,
+            pedido=item.pedido,
+            data_entrega=item.data_entrega,
+            categoria=item.categoria,
+            modelo=item.modelo,
+            acabamento_placa=acabamento,
+            posicao_puxador=item.posicao_puxador,
+            qtd_pecas=op_qty,
+            largura_nominal_mm=round(largura_nom, 3),
+            desconto_largura_mm=desc_l,
+            largura_corte_mm=_safe_cut(largura_nom, desc_l),
+            regra_largura=regra_l,
+            altura_nominal_mm=round(altura_nom, 3),
+            desconto_altura_mm=desc_a,
+            altura_corte_mm=_safe_cut(altura_nom, desc_a),
+            regra_altura=regra_a,
+        )
+    ]
+
+
+def build_glass_cutting_plan(
+    items: List[ExtractedItem], rules: Dict[str, CuttingRule]
+) -> tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """Gera a lista detalhada de corte de vidros por OP e o resumo agrupado."""
+    detailed_glasses: List[CutGlass] = []
+    for item in items:
+        detailed_glasses.extend(compute_item_glasses(item, rules))
+
+    grouped: Dict[tuple, Dict[str, Any]] = {}
+    for g in detailed_glasses:
+        key = (
+            g.modelo,
+            g.acabamento_placa,
+            g.largura_corte_mm,
+            g.altura_corte_mm,
+            g.regra_largura,
+            g.regra_altura,
+        )
+        if key not in grouped:
+            grouped[key] = {
+                "modelo": g.modelo,
+                "acabamento_placa": g.acabamento_placa,
+                "largura_corte_mm": g.largura_corte_mm,
+                "altura_corte_mm": g.altura_corte_mm,
+                "regra_largura": g.regra_largura,
+                "regra_altura": g.regra_altura,
+                "qtd_pecas": 0,
+                "area_m2": 0.0,
+                "ops": set(),
+            }
+        entry = grouped[key]
+        entry["qtd_pecas"] += g.qtd_pecas
+        entry["area_m2"] = round(entry["area_m2"] + g.area_m2, 4)
+        entry["ops"].add(g.op)
+
+    summary_list: List[Dict[str, Any]] = []
+    for entry in grouped.values():
+        ops_sorted = sorted(entry["ops"])
+        summary_list.append(
+            {
+                "modelo": entry["modelo"],
+                "acabamento_placa": entry["acabamento_placa"],
+                "largura_corte_mm": entry["largura_corte_mm"],
+                "altura_corte_mm": entry["altura_corte_mm"],
+                "regra_largura": entry["regra_largura"],
+                "regra_altura": entry["regra_altura"],
+                "qtd_pecas": entry["qtd_pecas"],
+                "area_m2": entry["area_m2"],
+                "qtd_ops": len(ops_sorted),
+                "ops": ", ".join(ops_sorted[:10])
+                + (f" (+{len(ops_sorted) - 10})" if len(ops_sorted) > 10 else ""),
+            }
+        )
+
+    summary_list.sort(
+        key=lambda x: (
+            x["modelo"],
+            x["acabamento_placa"],
+            -x["altura_corte_mm"],
+            -x["largura_corte_mm"],
+        )
+    )
+
+    return [g.to_dict() for g in detailed_glasses], summary_list
+
+
 def compute_kpis(
     items: List[ExtractedItem],
     detailed_bars: List[Dict[str, Any]],
+    detailed_glasses: List[Dict[str, Any]] | None = None,
 ) -> Dict[str, Any]:
     """Calcula indicadores consolidados da consulta."""
     total_itens = len(items)
@@ -409,6 +608,9 @@ def compute_kpis(
     total_estruturas = sum(_qty_int(i) * i.qtd_estruturas for i in items)
     total_barras = sum(b["qtd_barras"] for b in detailed_bars)
     total_metros = round(sum(b["total_mm"] for b in detailed_bars) / 1000.0, 2)
+    glasses = detailed_glasses or []
+    total_pecas_vidro = sum(g["qtd_pecas"] for g in glasses)
+    total_area_vidro_m2 = round(sum(g["area_m2"] for g in glasses), 2)
     itens_com_divisoria = sum(1 for i in items if i.tem_divisorias)
     itens_com_puxador = sum(1 for i in items if i.tem_puxador)
     total_puxadores = sum(_qty_int(i) * i.qtd_puxadores for i in items)
@@ -426,6 +628,8 @@ def compute_kpis(
         "total_estruturas": total_estruturas,
         "total_barras_corte": total_barras,
         "total_metros_lineares": total_metros,
+        "total_pecas_vidro": total_pecas_vidro,
+        "total_area_vidro_m2": total_area_vidro_m2,
         "itens_com_divisoria": itens_com_divisoria,
         "itens_com_puxador": itens_com_puxador,
         "total_puxadores": total_puxadores,

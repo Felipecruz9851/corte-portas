@@ -14,7 +14,13 @@ if str(BACKEND_DIR) not in sys.path:
 
 from fastapi.testclient import TestClient
 
-from app.cutting_engine import build_cutting_plan, compute_item_cuts, load_rules
+from app.cutting_engine import (
+    CuttingRule,
+    build_cutting_plan,
+    compute_item_cuts,
+    compute_item_glasses,
+    load_rules,
+)
 from app.description_parser import parse_description
 from app.html_parser import RawOpRow, parse_op_html
 from main import app
@@ -194,9 +200,14 @@ class TestExtractionAndCutting(unittest.TestCase):
         self.assertEqual(res_csv.status_code, 200)
         self.assertIn("medida_corte_mm", res_csv.text)
 
+        res_csv_vidro = self.client.post("/api/export/csv", json={"mode": "vidro"})
+        self.assertEqual(res_csv_vidro.status_code, 200)
+        self.assertIn("largura_corte_mm", res_csv_vidro.text)
+
         res_json = self.client.post("/api/export/json", json={})
         self.assertEqual(res_json.status_code, 200)
         self.assertIn("corte_agrupado", res_json.json())
+        self.assertIn("vidro_agrupado", res_json.json())
 
         # 5) POST /api/extract/erp (com mock HTTP para validar fluxo completo)
         with patch("app.erp_client.ERPClient.fetch_op_abertura", return_value=html_text):
@@ -260,6 +271,94 @@ class TestExtractionAndCutting(unittest.TestCase):
         self.assertEqual(by_fn_sup["Horizontal Quadro"].medida_corte_mm, 250.0)
         self.assertEqual(by_fn_sup["Vertical Quadro"].desconto_mm, 35.0)
         self.assertEqual(by_fn_sup["Vertical Quadro"].medida_corte_mm, 365.0)
+
+    def test_glass_cutting_discounts_by_handle_position(self) -> None:
+        custom_rules = dict(self.rules)
+        custom_rules["RISK"] = CuttingRule(
+            modelo="RISK",
+            descricao="Risk teste vidro",
+            tipo_corte="45°",
+            desconto_vertical_mm=0.0,
+            desconto_horizontal_mm=0.0,
+            desconto_divisoria_mm=0.0,
+            desconto_vidro_lateral_mm=10.0,
+            desconto_vidro_puxador_mm=25.0,
+        )
+
+        def make_row(codigo: str, desc: str) -> RawOpRow:
+            return RawOpRow(
+                local_producao="PORTAS",
+                data_abertura="2026-11-18",
+                data_entrega="25/11/2026",
+                codigo=codigo,
+                descricao=desc,
+                quantidade=2.0,
+                op="1999999",
+                observacao="",
+                pedido="200000",
+                item_pedido="100",
+                ambiente="SALA",
+                valor_insumos=None,
+                valor_mp=None,
+            )
+
+        # 1) Sem puxador: 2x Lateral em L e A (2*10 = 20mm em ambos)
+        g_sem = compute_item_glasses(
+            parse_description(
+                make_row(
+                    "2PTNP1",
+                    "PORTA BATER RISK_DIREITA - SEM PUXADOR - LARGURA 500_ALTURA 1000_PERFIL DAKAR_PLACA ESPELHO PRATA",
+                )
+            ),
+            custom_rules,
+        )[0]
+        self.assertEqual(g_sem.qtd_pecas, 2)
+        self.assertEqual(g_sem.desconto_largura_mm, 20.0)
+        self.assertEqual(g_sem.largura_corte_mm, 480.0)
+        self.assertEqual(g_sem.desconto_altura_mm, 20.0)
+        self.assertEqual(g_sem.altura_corte_mm, 980.0)
+
+        # 2) Puxador Superior: L desconta 2x Lateral (20mm), A desconta 1x Puxador + 1x Lateral (35mm)
+        g_sup = compute_item_glasses(
+            parse_description(
+                make_row(
+                    "2PTAG2",
+                    "PORTA BATER RISK USINADO SUPERIOR - DIREITA - LARGURA 500 - ALTURA 1000 - PERFIL UMBRA - PLACA ESPELHO PRATA",
+                )
+            ),
+            custom_rules,
+        )[0]
+        self.assertEqual(g_sup.largura_corte_mm, 480.0)
+        self.assertEqual(g_sup.desconto_altura_mm, 35.0)
+        self.assertEqual(g_sup.altura_corte_mm, 965.0)
+
+        # 3) Puxador Lateral (1 lado): L desconta 1x Puxador + 1x Lateral (35mm), A desconta 2x Lateral (20mm)
+        g_lat = compute_item_glasses(
+            parse_description(
+                make_row(
+                    "2PTNP2",
+                    "PORTA BATER RISK_DIREITA_LARGURA 500_ALTURA 1000_PERFIL DAKAR_PLACA ESPELHO PRATA",
+                )
+            ),
+            custom_rules,
+        )[0]
+        self.assertEqual(g_lat.desconto_largura_mm, 35.0)
+        self.assertEqual(g_lat.largura_corte_mm, 465.0)
+        self.assertEqual(g_lat.altura_corte_mm, 980.0)
+
+        # 4) Puxador Duplo (2 lados): L desconta 2x Puxador (50mm), A desconta 2x Lateral (20mm)
+        g_dup = compute_item_glasses(
+            parse_description(
+                make_row(
+                    "2PTNP3",
+                    "PORTA SOFT CLOSING SI OCEAN 80_CORRER RISK_EXTERNA_C/ PUXADOR DIREITO E ESQUERDO_LARGURA 500_ALTURA 1000_PERFIL DAKAR_PLACA ESPELHO PRATA",
+                )
+            ),
+            custom_rules,
+        )[0]
+        self.assertEqual(g_dup.desconto_largura_mm, 50.0)
+        self.assertEqual(g_dup.largura_corte_mm, 450.0)
+        self.assertEqual(g_dup.altura_corte_mm, 980.0)
 
 
 if __name__ == "__main__":

@@ -14,7 +14,9 @@ from pydantic import BaseModel, Field
 from app.cutting_engine import (
     CuttingRule,
     build_cutting_plan,
+    build_glass_cutting_plan,
     compute_item_cuts,
+    compute_item_glasses,
     compute_kpis,
     load_rules,
     save_rules,
@@ -79,6 +81,8 @@ class RuleUpdateModel(BaseModel):
     desconto_vertical_mm: float = 0.0
     desconto_horizontal_mm: float = 0.0
     desconto_divisoria_mm: float = 0.0
+    desconto_vidro_lateral_mm: float = 0.0
+    desconto_vidro_puxador_mm: float = 0.0
     observacao: str = ""
 
 
@@ -87,10 +91,12 @@ class RulesBatchUpdate(BaseModel):
 
 
 class ExportRequest(BaseModel):
-    mode: str = "items"  # para CSV: 'items' ou 'corte'
+    mode: str = "items"  # para CSV: 'items', 'corte' ou 'vidro'
     items: Optional[List[Dict[str, Any]]] = None
     detailed_bars: Optional[List[Dict[str, Any]]] = None
     grouped_bars: Optional[List[Dict[str, Any]]] = None
+    detailed_glasses: Optional[List[Dict[str, Any]]] = None
+    grouped_glasses: Optional[List[Dict[str, Any]]] = None
     meta: Optional[Dict[str, Any]] = None
     kpis: Optional[Dict[str, Any]] = None
 
@@ -119,12 +125,14 @@ def _build_response_payload(
     rules: Dict[str, CuttingRule],
 ) -> Dict[str, Any]:
     detailed_bars, grouped_bars = build_cutting_plan(all_items, rules)
-    kpis = compute_kpis(all_items, detailed_bars)
+    detailed_glasses, grouped_glasses = build_glass_cutting_plan(all_items, rules)
+    kpis = compute_kpis(all_items, detailed_bars, detailed_glasses)
 
     items_dicts: List[Dict[str, Any]] = []
     for item in all_items:
         d = item.to_dict()
         d["barras_corte"] = [b.to_dict() for b in compute_item_cuts(item, rules)]
+        d["vidros_corte"] = [g.to_dict() for g in compute_item_glasses(item, rules)]
         items_dicts.append(d)
 
     datas_abertura = sorted(
@@ -147,6 +155,8 @@ def _build_response_payload(
         "items": items_dicts,
         "corte_detalhado": detailed_bars,
         "corte_agrupado": grouped_bars,
+        "vidro_detalhado": detailed_glasses,
+        "vidro_agrupado": grouped_glasses,
         "rules": {k: v.to_dict() for k, v in rules.items()},
     }
 
@@ -263,6 +273,8 @@ def _resolve_export_data(req: Optional[ExportRequest]) -> Dict[str, Any]:
             "items": req.items,
             "corte_detalhado": req.detailed_bars or [],
             "corte_agrupado": req.grouped_bars or [],
+            "vidro_detalhado": req.detailed_glasses or [],
+            "vidro_agrupado": req.grouped_glasses or [],
         }
     if STORE.payload:
         return STORE.payload
@@ -279,6 +291,8 @@ def export_xlsx(req: Optional[ExportRequest] = None) -> Response:
         data["items"],
         data["corte_detalhado"],
         data["corte_agrupado"],
+        data.get("vidro_detalhado", []),
+        data.get("vidro_agrupado", []),
     )
     return Response(
         content=xlsx_bytes,
@@ -291,8 +305,18 @@ def export_xlsx(req: Optional[ExportRequest] = None) -> Response:
 def export_csv(req: Optional[ExportRequest] = None) -> Response:
     data = _resolve_export_data(req)
     mode = req.mode if req else "items"
-    csv_bytes = export_to_csv_bytes(data["items"], data["corte_agrupado"], mode=mode)
-    filename = "corte_serra_portas.csv" if mode == "corte" else "itens_portas.csv"
+    csv_bytes = export_to_csv_bytes(
+        data["items"],
+        data["corte_agrupado"],
+        data.get("vidro_agrupado", []),
+        mode=mode,
+    )
+    if mode == "corte":
+        filename = "corte_serra_portas.csv"
+    elif mode == "vidro":
+        filename = "corte_vidros_portas.csv"
+    else:
+        filename = "itens_portas.csv"
     return Response(
         content=csv_bytes,
         media_type="text/csv; charset=utf-8",
@@ -309,6 +333,8 @@ def export_json(req: Optional[ExportRequest] = None) -> Response:
         data["items"],
         data["corte_detalhado"],
         data["corte_agrupado"],
+        data.get("vidro_detalhado", []),
+        data.get("vidro_agrupado", []),
     )
     return Response(
         content=json_bytes,

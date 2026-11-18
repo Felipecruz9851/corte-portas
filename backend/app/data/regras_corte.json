@@ -6,9 +6,11 @@
     "desconto_vertical_mm": 0.0,
     "desconto_horizontal_mm": 0.0,
     "desconto_divisoria_mm": 0.0,
-    "largura_perfil_quadro_mm": 12.0,
-    "largura_perfil_puxador_mm": 12.0,
+    "largura_perfil_quadro_mm": 0.0,
+    "largura_perfil_puxador_mm": 0.0,
     "desconto_adjacente_puxador_mm": 0.0,
+    "desconto_vidro_lateral_mm": 0.0,
+    "desconto_vidro_puxador_mm": 0.0,
     "observacao": "Quadro externo nas dimensões + divisórias internas na largura"
   },
   "CATCH": {
@@ -21,6 +23,8 @@
     "largura_perfil_quadro_mm": 0.0,
     "largura_perfil_puxador_mm": 0.0,
     "desconto_adjacente_puxador_mm": 0.0,
+    "desconto_vidro_lateral_mm": 0.0,
+    "desconto_vidro_puxador_mm": 0.0,
     "observacao": "Medidas nominais por padrão; ajustar desconto se aplicável ao perfil 5307/5317"
   },
   "PERFIL 5307": {
@@ -33,6 +37,8 @@
     "largura_perfil_quadro_mm": 0.0,
     "largura_perfil_puxador_mm": 0.0,
     "desconto_adjacente_puxador_mm": 0.0,
+    "desconto_vidro_lateral_mm": 0.0,
+    "desconto_vidro_puxador_mm": 0.0,
     "observacao": "Medidas nominais por padrão"
   },
   "DJEI": {
@@ -42,9 +48,11 @@
     "desconto_vertical_mm": 0.0,
     "desconto_horizontal_mm": 0.0,
     "desconto_divisoria_mm": 0.0,
-    "largura_perfil_quadro_mm": 35.0,
-    "largura_perfil_puxador_mm": 80.0,
-    "desconto_adjacente_puxador_mm": 45.0,
+    "largura_perfil_quadro_mm": 0.0,
+    "largura_perfil_puxador_mm": 0.0,
+    "desconto_adjacente_puxador_mm": 0.0,
+    "desconto_vidro_lateral_mm": 0.0,
+    "desconto_vidro_puxador_mm": 0.0,
     "observacao": "Medidas nominais por padrão"
   },
   "CLEAR S": {
@@ -57,6 +65,8 @@
     "largura_perfil_quadro_mm": 0.0,
     "largura_perfil_puxador_mm": 0.0,
     "desconto_adjacente_puxador_mm": 0.0,
+    "desconto_vidro_lateral_mm": 0.0,
+    "desconto_vidro_puxador_mm": 0.0,
     "observacao": "Medidas nominais por padrão"
   },
   "CLEAR G": {
@@ -69,6 +79,8 @@
     "largura_perfil_quadro_mm": 45.0,
     "largura_perfil_puxador_mm": 80.0,
     "desconto_adjacente_puxador_mm": 35.0,
+    "desconto_vidro_lateral_mm": 0.0,
+    "desconto_vidro_puxador_mm": 0.0,
     "observacao": "Puxador 80mm - Quadro 45mm = 35mm descontados das peças adjacentes ao puxador"
   },
   "RISK": {
@@ -81,6 +93,8 @@
     "largura_perfil_quadro_mm": 0.0,
     "largura_perfil_puxador_mm": 0.0,
     "desconto_adjacente_puxador_mm": 0.0,
+    "desconto_vidro_lateral_mm": 0.0,
+    "desconto_vidro_puxador_mm": 0.0,
     "observacao": "Inclui Risk Usinado, Inclinado e Sem Usinagem"
   },
   "GROOVE": {
@@ -93,6 +107,8 @@
     "largura_perfil_quadro_mm": 0.0,
     "largura_perfil_puxador_mm": 0.0,
     "desconto_adjacente_puxador_mm": 0.0,
+    "desconto_vidro_lateral_mm": 0.0,
+    "desconto_vidro_puxador_mm": 0.0,
     "observacao": "Medidas nominais por padrão"
   },
   "INTEIRA": {
@@ -105,6 +121,8 @@
     "largura_perfil_quadro_mm": 0.0,
     "largura_perfil_puxador_mm": 0.0,
     "desconto_adjacente_puxador_mm": 0.0,
+    "desconto_vidro_lateral_mm": 0.0,
+    "desconto_vidro_puxador_mm": 0.0,
     "observacao": "Medidas nominais por padrão"
   },
   "SINGULAR": {
@@ -117,6 +135,8 @@
     "largura_perfil_quadro_mm": 0.0,
     "largura_perfil_puxador_mm": 0.0,
     "desconto_adjacente_puxador_mm": 0.0,
+    "desconto_vidro_lateral_mm": 0.0,
+    "desconto_vidro_puxador_mm": 0.0,
     "observacao": "Com divisórias entre vãos inferior, central e superior"
   },
   "MINI KENDO + BAGUETE": {
@@ -129,6 +149,8 @@
     "largura_perfil_quadro_mm": 0.0,
     "largura_perfil_puxador_mm": 0.0,
     "desconto_adjacente_puxador_mm": 0.0,
+    "desconto_vidro_lateral_mm": 0.0,
+    "desconto_vidro_puxador_mm": 0.0,
     "observacao": "Usa diretamente as medidas de corte informadas na descrição quando disponíveis"
   },
   "OUTRO": {
@@ -141,6 +163,8 @@
     "largura_perfil_quadro_mm": 0.0,
     "largura_perfil_puxador_mm": 0.0,
     "desconto_adjacente_puxador_mm": 0.0,
+    "desconto_vidro_lateral_mm": 0.0,
+    "desconto_vidro_puxador_mm": 0.0,
     "observacao": "Regra padrão nominal"
   }
 }

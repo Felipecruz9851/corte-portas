@@ -12,7 +12,7 @@ if str(BACKEND_DIR) not in sys.path:
 
 
 def main() -> None:
-    host = os.environ.get("HOST", "127.0.0.1")
+    host = os.environ.get("HOST", "0.0.0.0")
     port = int(os.environ.get("PORT", "8085"))
     uvicorn.run("main:app", host=host, port=port, reload=False)
 

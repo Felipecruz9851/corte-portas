@@ -28,6 +28,7 @@ const els = {
   btnExportXlsx: document.getElementById("btn-export-xlsx"),
   btnExportCsvItems: document.getElementById("btn-export-csv-items"),
   btnExportCsvCorte: document.getElementById("btn-export-csv-corte"),
+  btnExportCsvVidro: document.getElementById("btn-export-csv-vidro"),
   btnExportJson: document.getElementById("btn-export-json"),
 
   fBusca: document.getElementById("f-busca"),
@@ -45,6 +46,13 @@ const els = {
   corteAgrupadoRadio: document.getElementById("corte-agrupado"),
   corteDetalhadoRadio: document.getElementById("corte-detalhado"),
 
+  vidrosThead: document.getElementById("vidros-thead"),
+  vidrosTbody: document.getElementById("vidros-tbody"),
+  vidroCountLabel: document.getElementById("vidro-count-label"),
+  fVidroModelo: document.getElementById("f-vidro-modelo"),
+  vidroAgrupadoRadio: document.getElementById("vidro-agrupado"),
+  vidroDetalhadoRadio: document.getElementById("vidro-detalhado"),
+
   rulesTbody: document.getElementById("rules-tbody"),
   btnSaveRules: document.getElementById("btn-save-rules"),
   btnResetRules: document.getElementById("btn-reset-rules"),
@@ -55,6 +63,7 @@ const els = {
   svgContainer: document.getElementById("svg-container"),
   detailDl: document.getElementById("detail-dl"),
   detailBarsTbody: document.getElementById("detail-bars-tbody"),
+  detailGlassTbody: document.getElementById("detail-glass-tbody"),
   detailRawDesc: document.getElementById("detail-raw-desc"),
 };
 
@@ -158,11 +167,13 @@ function applyPayload(payload) {
   populateFilters(payload.items);
   applyItemFilters();
   renderCorteTable();
+  renderVidrosTable();
 
   const hasData = payload.items && payload.items.length > 0;
   els.btnExportXlsx.disabled = !hasData;
   els.btnExportCsvItems.disabled = !hasData;
   els.btnExportCsvCorte.disabled = !hasData;
+  els.btnExportCsvVidro.disabled = !hasData;
   els.btnExportJson.disabled = !hasData;
 }
 
@@ -174,6 +185,8 @@ function renderKpis(kpis, meta) {
   document.getElementById("kpi-especiais").textContent = `${kpis.itens_especiais} especiais`;
   document.getElementById("kpi-barras").textContent = kpis.total_barras_corte;
   document.getElementById("kpi-metros").textContent = `${kpis.total_metros_lineares} m lineares`;
+  document.getElementById("kpi-vidros").textContent = kpis.total_pecas_vidro ?? 0;
+  document.getElementById("kpi-area-vidros").textContent = `${kpis.total_area_vidro_m2 ?? 0} m²`;
   document.getElementById("kpi-puxadores").textContent = kpis.total_puxadores;
   document.getElementById("kpi-itens-pux").textContent = `${kpis.itens_com_puxador} itens c/ puxador`;
   document.getElementById("kpi-divisorias").textContent = kpis.itens_com_divisoria;
@@ -195,6 +208,7 @@ function populateFilters(items) {
 
   fillSelect(els.fModelo, modelos, "Todos");
   fillSelect(els.fCorteModelo, modelos, "Todos");
+  fillSelect(els.fVidroModelo, modelos, "Todos");
   fillSelect(els.fPuxador, puxadores, "Todas");
   fillSelect(els.fEntrega, entregas, "Todas");
 }
@@ -372,6 +386,104 @@ function renderCorteTable() {
   }
 }
 
+function renderVidrosTable() {
+  if (!STATE.payload) return;
+  const isAgrupado = els.vidroAgrupadoRadio.checked;
+  const modeloFilter = els.fVidroModelo.value;
+
+  if (isAgrupado) {
+    const rows = (STATE.payload.vidro_agrupado || []).filter(
+      (r) => !modeloFilter || r.modelo === modeloFilter
+    );
+    els.vidroCountLabel.textContent = `${rows.length} medida(s) de vidro`;
+    els.vidrosThead.innerHTML = `
+      <tr>
+        <th>Modelo</th>
+        <th>Acabamento / Placa</th>
+        <th>Qtd Peças</th>
+        <th>Largura Corte (mm)</th>
+        <th>Altura Corte (mm)</th>
+        <th>Regra Largura</th>
+        <th>Regra Altura</th>
+        <th>Área (m²)</th>
+        <th>OPs</th>
+      </tr>
+    `;
+    if (!rows.length) {
+      els.vidrosTbody.innerHTML =
+        '<tr><td colspan="9" class="empty-cell">Nenhum vidro para este filtro.</td></tr>';
+      return;
+    }
+    els.vidrosTbody.innerHTML = rows
+      .map(
+        (r) => `
+      <tr>
+        <th><span class="badge">${escapeHtml(r.modelo)}</span></th>
+        <td>${escapeHtml(r.acabamento_placa)}</td>
+        <td class="num"><strong>${r.qtd_pecas}</strong></td>
+        <td class="num"><strong>${fmtNum(r.largura_corte_mm)}</strong></td>
+        <td class="num"><strong>${fmtNum(r.altura_corte_mm)}</strong></td>
+        <td>${escapeHtml(r.regra_largura)}</td>
+        <td>${escapeHtml(r.regra_altura)}</td>
+        <td class="num">${fmtNum(r.area_m2)}</td>
+        <td>${escapeHtml(r.ops)}</td>
+      </tr>
+    `
+      )
+      .join("");
+  } else {
+    const rows = (STATE.payload.vidro_detalhado || []).filter(
+      (r) => !modeloFilter || r.modelo === modeloFilter
+    );
+    els.vidroCountLabel.textContent = `${rows.length} linha(s) de vidro por OP`;
+    els.vidrosThead.innerHTML = `
+      <tr>
+        <th>OP</th>
+        <th>Código</th>
+        <th>Entrega</th>
+        <th>Modelo</th>
+        <th>Acabamento / Placa</th>
+        <th>Posição Puxador</th>
+        <th>Qtd</th>
+        <th>Larg. Nom.</th>
+        <th>Desc. L</th>
+        <th>Larg. Corte (mm)</th>
+        <th>Alt. Nom.</th>
+        <th>Desc. A</th>
+        <th>Alt. Corte (mm)</th>
+        <th>Área (m²)</th>
+      </tr>
+    `;
+    if (!rows.length) {
+      els.vidrosTbody.innerHTML =
+        '<tr><td colspan="14" class="empty-cell">Nenhum vidro para este filtro.</td></tr>';
+      return;
+    }
+    els.vidrosTbody.innerHTML = rows
+      .map(
+        (r) => `
+      <tr>
+        <th>${escapeHtml(r.op)}</th>
+        <td><code>${escapeHtml(r.codigo)}</code></td>
+        <td>${escapeHtml(r.data_entrega)}</td>
+        <td><span class="badge">${escapeHtml(r.modelo)}</span></td>
+        <td>${escapeHtml(r.acabamento_placa)}</td>
+        <td>${escapeHtml(r.posicao_puxador)}</td>
+        <td class="num"><strong>${r.qtd_pecas}</strong></td>
+        <td class="num">${fmtNum(r.largura_nominal_mm)}</td>
+        <td class="num">${fmtNum(r.desconto_largura_mm)}</td>
+        <td class="num"><strong>${fmtNum(r.largura_corte_mm)}</strong></td>
+        <td class="num">${fmtNum(r.altura_nominal_mm)}</td>
+        <td class="num">${fmtNum(r.desconto_altura_mm)}</td>
+        <td class="num"><strong>${fmtNum(r.altura_corte_mm)}</strong></td>
+        <td class="num">${fmtNum(r.area_m2)}</td>
+      </tr>
+    `
+      )
+      .join("");
+  }
+}
+
 function renderRulesTable() {
   const keys = Object.keys(STATE.rules).sort();
   els.rulesTbody.innerHTML = keys
@@ -394,6 +506,8 @@ function renderRulesTable() {
           <td><input type="number" step="0.5" class="rule-input" data-field="desconto_vertical_mm" aria-label="Desconto fixo vertical em mm para ${escapeHtml(r.modelo)}" value="${r.desconto_vertical_mm}"></td>
           <td><input type="number" step="0.5" class="rule-input" data-field="desconto_horizontal_mm" aria-label="Desconto fixo horizontal em mm para ${escapeHtml(r.modelo)}" value="${r.desconto_horizontal_mm}"></td>
           <td><input type="number" step="0.5" class="rule-input" data-field="desconto_divisoria_mm" aria-label="Desconto fixo divisória em mm para ${escapeHtml(r.modelo)}" value="${r.desconto_divisoria_mm}"></td>
+          <td><input type="number" step="0.5" min="0" class="rule-input" data-field="desconto_vidro_lateral_mm" aria-label="Desconto vidro lateral em mm por lado para ${escapeHtml(r.modelo)}" value="${r.desconto_vidro_lateral_mm ?? 0}"></td>
+          <td><input type="number" step="0.5" min="0" class="rule-input" data-field="desconto_vidro_puxador_mm" aria-label="Desconto vidro lado puxador em mm por lado para ${escapeHtml(r.modelo)}" value="${r.desconto_vidro_puxador_mm ?? 0}"></td>
           <td>${escapeHtml(r.observacao || "")}</td>
         </tr>
       `;
@@ -501,6 +615,23 @@ function openItemDetail(item) {
     `
     )
     .join("");
+
+  const vidros = item.vidros_corte || [];
+  els.detailGlassTbody.innerHTML = vidros.length
+    ? vidros
+        .map(
+          (g) => `
+        <tr>
+          <td>${escapeHtml(g.acabamento_placa)}</td>
+          <td class="num"><strong>${g.qtd_pecas}</strong></td>
+          <td class="num"><strong>${fmtNum(g.largura_corte_mm)} mm</strong></td>
+          <td class="num"><strong>${fmtNum(g.altura_corte_mm)} mm</strong></td>
+          <td>L: -${fmtNum(g.desconto_largura_mm)} (${escapeHtml(g.regra_largura)}) · A: -${fmtNum(g.desconto_altura_mm)} (${escapeHtml(g.regra_altura)})</td>
+        </tr>
+      `
+        )
+        .join("")
+    : '<tr><td colspan="5">Item sem placa/vidro para corte.</td></tr>';
 
   els.detailRawDesc.textContent = item.descricao;
   els.detailDialog.showModal();
@@ -668,6 +799,9 @@ async function init() {
   [els.corteAgrupadoRadio, els.corteDetalhadoRadio, els.fCorteModelo].forEach(
     (el) => el.addEventListener("change", renderCorteTable)
   );
+  [els.vidroAgrupadoRadio, els.vidroDetalhadoRadio, els.fVidroModelo].forEach(
+    (el) => el.addEventListener("change", renderVidrosTable)
+  );
 
   els.itemsTbody.addEventListener("click", (event) => {
     const tr = event.target.closest("tr[data-item-index]");
@@ -704,6 +838,9 @@ async function init() {
   );
   els.btnExportCsvCorte.addEventListener("click", () =>
     downloadExport("/api/export/csv", { mode: "corte" }, "corte_serra_portas.csv")
+  );
+  els.btnExportCsvVidro.addEventListener("click", () =>
+    downloadExport("/api/export/csv", { mode: "vidro" }, "corte_vidros_portas.csv")
   );
   els.btnExportJson.addEventListener("click", () =>
     downloadExport("/api/export/json", {}, "extracao_portas.json")
