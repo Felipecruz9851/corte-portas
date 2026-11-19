@@ -2,12 +2,12 @@
   "ALLU": {
     "modelo": "ALLU",
     "descricao": "Linha ALLU (Escada, Nicho, Lateral, Pé, Ilha)",
-    "tipo_corte": "90° (Topo)",
+    "tipo_corte": "90° (Explícito)",
     "desconto_vertical_mm": 0.0,
-    "desconto_horizontal_mm": 0.0,
-    "desconto_divisoria_mm": 0.0,
-    "largura_perfil_quadro_mm": 0.0,
-    "largura_perfil_puxador_mm": 0.0,
+    "desconto_horizontal_mm": 24.0,
+    "desconto_divisoria_mm": 24.0,
+    "largura_perfil_quadro_mm": 12.0,
+    "largura_perfil_puxador_mm": 12.0,
     "desconto_adjacente_puxador_mm": 0.0,
     "desconto_vidro_lateral_mm": 0.0,
     "desconto_vidro_puxador_mm": 0.0,
@@ -51,8 +51,8 @@
     "largura_perfil_quadro_mm": 0.0,
     "largura_perfil_puxador_mm": 0.0,
     "desconto_adjacente_puxador_mm": 0.0,
-    "desconto_vidro_lateral_mm": 0.0,
-    "desconto_vidro_puxador_mm": 0.0,
+    "desconto_vidro_lateral_mm": 5.0,
+    "desconto_vidro_puxador_mm": 20.0,
     "observacao": "Medidas nominais por padrão"
   },
   "CLEAR S": {

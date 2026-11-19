@@ -1,3 +1,6 @@
+
+
+
 """API FastAPI para extração construtiva e cálculo de plano de corte de PORTAS."""
 
 from __future__ import annotations
@@ -29,9 +32,18 @@ from app.exporter import (
     export_to_xlsx_bytes,
 )
 from app.html_parser import parse_op_html
+import sys
+import os
+import uvicorn
+
+BACKEND_DIR = Path(__file__).resolve().parent
+if str(BACKEND_DIR) not in sys.path:
+    sys.path.insert(0, str(BACKEND_DIR))
 
 BASE_DIR = Path(__file__).resolve().parent
 FRONTEND_DIR = BASE_DIR.parent / "frontend"
+FRONTEND_DIST_DIR = FRONTEND_DIR / "dist"
+FRONTEND_STATIC_DIR = FRONTEND_DIST_DIR / "static"
 DEFAULT_RULES_BACKUP = load_rules()
 
 app = FastAPI(
@@ -39,7 +51,9 @@ app = FastAPI(
     version="1.0.0",
 )
 
-if FRONTEND_DIR.exists():
+if FRONTEND_STATIC_DIR.exists():
+    app.mount("/static", StaticFiles(directory=str(FRONTEND_STATIC_DIR)), name="static")
+elif FRONTEND_DIR.exists():
     app.mount("/static", StaticFiles(directory=str(FRONTEND_DIR)), name="static")
 
 
@@ -168,10 +182,31 @@ def _build_response_payload(
 
 @app.get("/")
 def serve_index() -> FileResponse:
-    index_path = FRONTEND_DIR / "index.html"
+    dist_index = FRONTEND_DIST_DIR / "index.html"
+    index_path = dist_index if dist_index.exists() else (FRONTEND_DIR / "index.html")
     if not index_path.exists():
         raise HTTPException(404, "Frontend não encontrado.")
     return FileResponse(str(index_path))
+
+
+@app.get("/logo_lider.png")
+def serve_logo() -> FileResponse:
+    dist_logo = FRONTEND_DIST_DIR / "logo_lider.png"
+    public_logo = FRONTEND_DIR / "public" / "logo_lider.png"
+    logo_path = dist_logo if dist_logo.exists() else public_logo
+    if not logo_path.exists():
+        raise HTTPException(404, "Logo não encontrada.")
+    return FileResponse(str(logo_path))
+
+
+@app.get("/favicon.ico")
+def serve_favicon() -> FileResponse:
+    dist_favicon = FRONTEND_DIST_DIR / "favicon.ico"
+    public_favicon = FRONTEND_DIR / "public" / "favicon.ico"
+    favicon_path = dist_favicon if dist_favicon.exists() else public_favicon
+    if not favicon_path.exists():
+        raise HTTPException(404, "Favicon não encontrado.")
+    return FileResponse(str(favicon_path), media_type="image/x-icon")
 
 
 @app.get("/api/health")
@@ -341,3 +376,13 @@ def export_json(req: Optional[ExportRequest] = None) -> Response:
         media_type="application/json; charset=utf-8",
         headers={"Content-Disposition": 'attachment; filename="extracao_portas.json"'},
     )
+
+
+def main() -> None:
+    host = os.environ.get("HOST", "0.0.0.0")
+    port = int(os.environ.get("PORT", "8085"))
+    uvicorn.run("main:app", host=host, port=port, reload=False)
+
+
+if __name__ == "__main__":
+    main()

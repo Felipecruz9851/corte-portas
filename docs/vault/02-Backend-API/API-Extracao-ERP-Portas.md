@@ -2,16 +2,17 @@
 modulo: "backend/main.py + backend/app/exporter.py"
 tipo: "backend"
 linguagem: "python"
-data_atualizacao: 2026-11-18
+data_atualizacao: 2026-11-19
 tags: [codigo, backend, python, fastapi]
 ---
 
 # Módulo: API FastAPI e Exportador
 
-**Responsabilidade:** Expõe os endpoints HTTP REST para consulta ao vivo do ERP, parsing de HTML, gerenciamento de regras de corte em JSON e exportação em Excel multi-abas (`.xlsx`), CSV e JSON.
+**Responsabilidade:** Expõe os endpoints HTTP REST para consulta ao vivo do ERP, parsing de HTML, gerenciamento de regras de corte em JSON e exportação em Excel multi-abas (`.xlsx`), CSV e JSON, além de servir o build de produção do frontend Vite (`./frontend/dist/`).
 
 ## Principais Funções / Métodos
-* `extract_from_erp()` (`POST /api/extract/erp`): Consulta uma ou mais datas em `http://192.168.0.6/pcp/op_abertura.php` e retorna itens extraídos, barras e KPIs.
+* `serve_index()`, `serve_logo()`, `serve_favicon()` e montagem de `/static`: Servem `./frontend/dist/index.html`, `./frontend/dist/logo_lider.png`, `./frontend/dist/favicon.ico` e `./frontend/dist/static/` (`app.js`, `styles.css`), com fallback para `./frontend/`.
+* `extract_from_erp()` (`POST /api/extract/erp`): Consulta uma ou mais datas em `http://192.168.0.6/pcp/op_abertura.php` e retorna itens extraídos, barras, vidros e KPIs.
 * `extract_from_html()` (`POST /api/extract/html`): Executa o mesmo pipeline a partir de um HTML enviado.
 * `get_rules()`, `update_rules()`, `reset_rules()`: Lê, atualiza e reseta `./backend/app/data/regras_corte.json` recalculando os cortes em memória.
 * `export_xlsx()`, `export_csv()`, `export_json()`: Exportam planilhas formatadas via `./backend/app/exporter.py`.
