@@ -1,19 +1,34 @@
-import React, { useState } from "react";
+import React, { useId, useState } from "react";
 import {
   Calendar,
   Database,
   Eye,
   EyeOff,
+  FileText,
   FileUp,
   Loader2,
   PanelLeftClose,
+  Plus,
   RefreshCw,
+  Trash2,
   Upload,
   X,
   CheckCircle2,
   AlertCircle,
   Info,
 } from "lucide-react";
+
+function splitFilename(filename) {
+  const name = String(filename || "");
+  const dotIdx = name.lastIndexOf(".");
+  if (dotIdx <= 0 || dotIdx === name.length - 1) {
+    return { stem: name, ext: "" };
+  }
+  return {
+    stem: name.slice(0, dotIdx),
+    ext: name.slice(dotIdx),
+  };
+}
 
 export default function Sidebar({
   isOpen,
@@ -23,33 +38,43 @@ export default function Sidebar({
   erpForm,
   onChangeErpForm,
   onSubmitErp,
-  onUploadHtmlFile,
+  loadedHtmlFiles = [],
+  onUploadHtmlFiles,
+  onRemoveHtmlFile,
+  onClearHtmlFiles,
   isLoading,
   status,
   meta,
 }) {
   const [showPassword, setShowPassword] = useState(false);
   const [isDragOver, setIsDragOver] = useState(false);
-  const fileInputRef = React.useRef(null);
+  const [isAppendDragOver, setIsAppendDragOver] = useState(false);
+  const replaceInputId = useId();
+  const appendInputId = useId();
+  const dropzoneHelpId = useId();
 
   const handleFieldChange = (field) => (e) => {
     onChangeErpForm((prev) => ({ ...prev, [field]: e.target.value }));
   };
 
-  const handleFileChange = (e) => {
-    const file = e.target.files?.[0];
-    if (file) {
-      onUploadHtmlFile(file);
-    }
+  const handleFileChange = (append) => (e) => {
+    const files = Array.from(e.target.files || []);
     e.target.value = "";
+    if (files.length > 0 && onUploadHtmlFiles) {
+      onUploadHtmlFiles(files, { append });
+    }
   };
 
-  const handleDrop = (e) => {
+  const handleDrop = (append) => (e) => {
     e.preventDefault();
-    setIsDragOver(false);
-    const file = e.dataTransfer?.files?.[0];
-    if (file) {
-      onUploadHtmlFile(file);
+    if (append) {
+      setIsAppendDragOver(false);
+    } else {
+      setIsDragOver(false);
+    }
+    const files = Array.from(e.dataTransfer?.files || []);
+    if (files.length > 0 && onUploadHtmlFiles) {
+      onUploadHtmlFiles(files, { append });
     }
   };
 
@@ -386,11 +411,18 @@ export default function Sidebar({
 
           {/* Importação local de HTML */}
           <div className="space-y-3 pt-2 border-t border-lider-border">
-            <div className="flex items-center gap-2">
-              <FileUp className="w-3.5 h-3.5 text-lider-wood" strokeWidth={1.5} />
-              <h2 className="font-display text-xs uppercase tracking-[0.12em] font-medium text-lider-ink">
-                Arquivo Local (.html)
-              </h2>
+            <div className="flex items-center justify-between gap-2">
+              <div className="flex items-center gap-2">
+                <FileUp className="w-3.5 h-3.5 text-lider-wood" strokeWidth={1.5} />
+                <h2 className="font-display text-xs uppercase tracking-[0.12em] font-medium text-lider-ink">
+                  Arquivos Locais (.html)
+                </h2>
+              </div>
+              {loadedHtmlFiles.length > 0 && (
+                <span className="font-mono text-[11px] text-lider-wood">
+                  {loadedHtmlFiles.length} {loadedHtmlFiles.length === 1 ? "ativo" : "ativos"}
+                </span>
+              )}
             </div>
 
             <div
@@ -398,8 +430,12 @@ export default function Sidebar({
                 e.preventDefault();
                 setIsDragOver(true);
               }}
-              onDragLeave={() => setIsDragOver(false)}
-              onDrop={handleDrop}
+              onDragLeave={(e) => {
+                if (!e.currentTarget.contains(e.relatedTarget)) {
+                  setIsDragOver(false);
+                }
+              }}
+              onDrop={handleDrop(false)}
               className={[
                 "border border-dashed rounded-[2px] p-4 text-center transition-colors",
                 isDragOver
@@ -407,27 +443,140 @@ export default function Sidebar({
                   : "border-lider-border bg-lider-canvas/60",
               ].join(" ")}
             >
-              <input
-                ref={fileInputRef}
-                type="file"
-                accept=".html,.htm"
-                onChange={handleFileChange}
-                className="visually-hidden"
-                aria-label="Selecionar arquivo HTML de OP"
-              />
-              <p className="text-xs text-lider-slate mb-3">
-                Arraste o HTML exportado do ERP ou selecione manualmente.
+              <p id={dropzoneHelpId} className="text-xs text-lider-slate mb-3">
+                Arraste um ou mais arquivos HTML do ERP ou selecione manualmente.
               </p>
-              <button
-                type="button"
-                disabled={isLoading}
-                onClick={() => fileInputRef.current?.click()}
-                className="w-full h-10 px-3 bg-transparent hover:bg-lider-surface border border-lider-charcoal/40 hover:border-lider-charcoal text-lider-ink text-xs font-medium rounded-[2px] inline-flex items-center justify-center gap-2 transition-colors disabled:opacity-50"
-              >
-                <Upload className="w-3.5 h-3.5" strokeWidth={1.5} />
-                Carregar HTML local (.html)
-              </button>
+              <div className="relative">
+                <input
+                  id={replaceInputId}
+                  name="html_files"
+                  type="file"
+                  accept=".html,.htm,text/html"
+                  multiple
+                  disabled={isLoading}
+                  aria-describedby={dropzoneHelpId}
+                  onChange={handleFileChange(false)}
+                  className="visually-hidden peer"
+                />
+                <label
+                  htmlFor={replaceInputId}
+                  className="w-full h-10 px-3 bg-transparent hover:bg-lider-surface border border-lider-charcoal/40 hover:border-lider-charcoal text-lider-ink text-xs font-medium rounded-[2px] inline-flex items-center justify-center gap-2 transition-colors cursor-pointer peer-focus-visible:outline peer-focus-visible:outline-2 peer-focus-visible:outline-lider-wood peer-focus-visible:outline-offset-2 peer-disabled:opacity-50 peer-disabled:cursor-not-allowed peer-disabled:pointer-events-none"
+                >
+                  <Upload className="w-3.5 h-3.5 shrink-0" strokeWidth={1.5} />
+                  <span>Carregar HTML(s) local</span>
+                </label>
+              </div>
             </div>
+
+            {loadedHtmlFiles.length > 0 && (
+              <div className="space-y-2.5">
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-[11px] uppercase tracking-[0.06em] text-lider-slate">
+                    Arquivos carregados ({loadedHtmlFiles.length})
+                  </span>
+                  <button
+                    type="button"
+                    disabled={isLoading}
+                    onClick={onClearHtmlFiles}
+                    className="inline-flex items-center gap-1 px-2 py-1 text-[11px] text-lider-slate hover:text-red-800 border border-transparent hover:border-lider-border rounded-[2px] transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    <Trash2 className="w-3 h-3" strokeWidth={1.5} />
+                    <span>Limpar</span>
+                  </button>
+                </div>
+
+                <ul
+                  aria-label="Arquivos HTML carregados na sessão"
+                  className="max-h-44 overflow-y-auto divide-y divide-lider-border border border-lider-border rounded-[2px] bg-lider-surface"
+                >
+                  {loadedHtmlFiles.map((file, idx) => {
+                    const { stem, ext } = splitFilename(file.name);
+                    const consultaMeta =
+                      meta?.consultas?.[idx]?.origem === file.name
+                        ? meta.consultas[idx]
+                        : null;
+                    return (
+                      <li
+                        key={file.key}
+                        className="flex items-center justify-between gap-2 px-2.5 py-1.5"
+                      >
+                        <div className="flex items-center gap-2 min-w-0 flex-1">
+                          <FileText
+                            className="w-3.5 h-3.5 text-lider-wood shrink-0"
+                            strokeWidth={1.5}
+                          />
+                          <span
+                            className="file-name-truncate font-mono text-[11px] text-lider-ink"
+                            title={file.name}
+                          >
+                            <span>{stem}</span>{ext}
+                          </span>
+                        </div>
+                        <div className="flex items-center gap-1.5 shrink-0">
+                          {consultaMeta && (
+                            <span className="text-[10px] font-mono text-lider-muted tabular-nums">
+                              {consultaMeta.total_linhas} lin.
+                            </span>
+                          )}
+                          <button
+                            type="button"
+                            disabled={isLoading}
+                            onClick={() => onRemoveHtmlFile(file.key)}
+                            aria-label={`Remover ${file.name}`}
+                            title={`Remover ${file.name}`}
+                            className="inline-flex items-center justify-center p-1 text-lider-muted hover:text-red-800 rounded-[2px] transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                          >
+                            <X className="w-3.5 h-3.5" strokeWidth={1.5} />
+                          </button>
+                        </div>
+                      </li>
+                    );
+                  })}
+                </ul>
+
+                <div
+                  onDragOver={(e) => {
+                    e.preventDefault();
+                    setIsAppendDragOver(true);
+                  }}
+                  onDragLeave={(e) => {
+                    if (!e.currentTarget.contains(e.relatedTarget)) {
+                      setIsAppendDragOver(false);
+                    }
+                  }}
+                  onDrop={handleDrop(true)}
+                  className={[
+                    "relative rounded-[2px] transition-colors",
+                    isAppendDragOver ? "bg-lider-wood/10" : "",
+                  ].join(" ")}
+                >
+                  <input
+                    id={appendInputId}
+                    name="html_files_append"
+                    type="file"
+                    accept=".html,.htm,text/html"
+                    multiple
+                    disabled={isLoading}
+                    onChange={handleFileChange(true)}
+                    className="visually-hidden peer"
+                  />
+                  <label
+                    htmlFor={appendInputId}
+                    className={[
+                      "w-full h-9 px-3 border border-dashed rounded-[2px] text-[11px] font-medium inline-flex items-center justify-center gap-1.5 transition-colors cursor-pointer",
+                      "peer-focus-visible:outline peer-focus-visible:outline-2 peer-focus-visible:outline-lider-wood peer-focus-visible:outline-offset-2",
+                      "peer-disabled:opacity-50 peer-disabled:cursor-not-allowed peer-disabled:pointer-events-none",
+                      isAppendDragOver
+                        ? "border-lider-wood text-lider-ink bg-lider-wood/5"
+                        : "border-lider-border text-lider-slate hover:text-lider-ink hover:border-lider-charcoal/50 bg-lider-canvas/40",
+                    ].join(" ")}
+                  >
+                    <Plus className="w-3.5 h-3.5 shrink-0" strokeWidth={1.5} />
+                    <span>Adicionar mais HTML(s) ao lote</span>
+                  </label>
+                </div>
+              </div>
+            )}
           </div>
 
           {/* Resumo da extração atual */}
@@ -448,6 +597,16 @@ export default function Sidebar({
                 <dd className="text-lider-ink text-right truncate">
                   {(meta.datas_abertura || []).join(", ") || "-"}
                 </dd>
+                {(meta.consultas || []).length > 1 && (
+                  <>
+                    <dt className="text-lider-muted">Origens:</dt>
+                    <dd className="text-lider-ink text-right font-mono">
+                      {loadedHtmlFiles.length > 0
+                        ? `${meta.consultas.length} arquivos`
+                        : `${meta.consultas.length} consultas`}
+                    </dd>
+                  </>
+                )}
                 <dt className="text-lider-muted">Linhas OP:</dt>
                 <dd className="text-lider-ink text-right font-mono">
                   {meta.total_linhas ?? 0}

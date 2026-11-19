@@ -1,16 +1,47 @@
-"""Otimizador de corte linear em barras (padrão 6 m) com agrupamento por código de perfil."""
+"""Otimizador de corte linear em barras (padrão 6 m) em dois cenários: Material vs Tempo de Execução."""
 
 from __future__ import annotations
 
-import math
+import re
 from bisect import bisect_left
 from collections import Counter, defaultdict, deque
 from dataclasses import asdict, dataclass
 from typing import Any, Dict, List, Optional, Tuple
 
-from app.cutting_engine import CuttingRule
+from app.cutting_engine import CuttingRule, _norm_angle, format_cut_angles
 
 SCALE_UM = 1000  # 1 mm = 1000 µm (evita imprecisão de ponto flutuante)
+
+
+def _resolve_bar_angles(bar: Dict[str, Any]) -> Tuple[int, int]:
+    """Resolve ângulos (esquerdo, direito) em {45, 90} a partir da barra ou texto."""
+    raw_esq = bar.get("angulo_esq")
+    raw_dir = bar.get("angulo_dir")
+    if raw_esq is not None and raw_dir is not None:
+        try:
+            e = int(round(float(raw_esq)))
+            d = int(round(float(raw_dir)))
+            if e in (45, 90) and d in (45, 90):
+                return e, d
+        except (TypeError, ValueError):
+            pass
+
+    raw_text = str(bar.get("angulos_corte") or bar.get("tipo_corte") or "")
+    matches = re.findall(r"\b(45|90)\b", raw_text)
+    if len(matches) >= 2:
+        return int(matches[0]), int(matches[1])
+    if len(matches) == 1:
+        ang = int(matches[0])
+        return ang, ang
+    return 45, 45
+
+
+def _format_angles(a_esq: int, a_dir: int) -> str:
+    return format_cut_angles(a_esq, a_dir)
+
+
+def _angle_sig(a_esq: int, a_dir: int) -> Tuple[int, int]:
+    return (min(a_esq, a_dir), max(a_esq, a_dir))
 
 
 def _to_um(mm: float) -> int:
@@ -23,18 +54,15 @@ def _from_um(um: int) -> float:
 
 @dataclass
 class OptimizationConfig:
-    """Parâmetros configuráveis para otimização em barras de 6 m."""
+    """Parâmetros configuráveis para otimização linear em barras (padrão 6 m)."""
 
     comprimento_barra_mm: float = 6000.0
-    perda_maxima_mm: float = 200.0
     espessura_serra_mm: float = 0.0
     desponte_mm: float = 0.0
     separar_por_acabamento: bool = False
 
     def to_dict(self) -> Dict[str, Any]:
-        data = asdict(self)
-        data["perda_maxima_cm"] = round(self.perda_maxima_mm / 10.0, 2)
-        return data
+        return asdict(self)
 
 
 def resolve_profile_group(
@@ -42,7 +70,7 @@ def resolve_profile_group(
     rules: Optional[Dict[str, CuttingRule]] = None,
     separar_por_acabamento: bool = False,
 ) -> Tuple[str, str, str, str, str]:
-    """Resolve a chave de agrupamento de uma barra de corte.
+    """Resolve o agrupamento físico de perfil de uma barra de corte.
 
     Prioridade:
     1. Código do perfil cadastrado (`codigo_perfil` na barra ou na regra do modelo);
@@ -92,11 +120,7 @@ def _find_bar_patterns(
     max_patterns: int = 1,
     node_limit: int = 6000,
 ) -> List[Dict[int, int]]:
-    """Busca exata com branch-and-bound de padrões válidos de 1 barra contendo `start_idx`.
-
-    Um padrão válido usa apenas índices >= `start_idx`, contém ao menos 1 peça de `start_idx`,
-    e tem soma em `[w_min_um, cap_um]`.
-    """
+    """Busca exata com branch-and-bound de padrões válidos de 1 barra contendo `start_idx`."""
     m = len(weights)
     if start_idx >= m or avail_qty[start_idx] <= 0:
         return []
@@ -104,7 +128,6 @@ def _find_bar_patterns(
     if anchor_w > cap_um:
         return []
 
-    # Soma restante a partir de cada índice (excluindo a peça âncora já alocada)
     suffix_sum = [0] * (m + 1)
     for i in range(m - 1, -1, -1):
         suffix_sum[i] = suffix_sum[i + 1] + weights[i] * avail_qty[i]
@@ -112,14 +135,11 @@ def _find_bar_patterns(
     min_w_global = weights[-1]
     avail_work = list(avail_qty)
     avail_work[start_idx] -= 1
-
-    # Para avançar rápido quando rem_space < weights[idx], usamos pesos negativos apenas se necessário;
-    # como weights está em ordem decrescente, preparamos lista ascendente para bisect_left se m > 12.
     neg_weights = [-w for w in weights]
 
     nodes = 0
-    best_tight: Optional[Tuple[int, int, Dict[int, int]]] = None  # (sum_um, -count, pattern)
-    best_conserve: Optional[Tuple[int, int, Dict[int, int]]] = None  # (-count, sum_um, pattern)
+    best_tight: Optional[Tuple[int, int, Dict[int, int]]] = None
+    best_conserve: Optional[Tuple[int, int, Dict[int, int]]] = None
     collected: List[Tuple[int, int, Dict[int, int]]] = []
     collect_limit = max(max_patterns * 6, 36)
 
@@ -154,7 +174,7 @@ def _find_bar_patterns(
             return idx
         return bisect_left(neg_weights, -rem_space, lo=idx, hi=m)
 
-    def dfs(idx: int, cur_sum: int, cur_count: int, rem_avail_after_anchor: int) -> None:
+    def dfs(idx: int, cur_sum: int, cur_count: int) -> None:
         nonlocal nodes
         if nodes >= node_limit:
             return
@@ -163,8 +183,7 @@ def _find_bar_patterns(
         if mode == "top_k" and len(collected) >= collect_limit:
             return
         if mode == "conserve_small" and best_conserve is not None:
-            best_cnt = -best_conserve[0]
-            if cur_count >= best_cnt:
+            if cur_count >= -best_conserve[0]:
                 return
 
         rem_space = cap_um - cur_sum
@@ -175,7 +194,6 @@ def _find_bar_patterns(
         if idx >= m:
             return
 
-        # Soma disponível real a partir de `idx`
         max_add = suffix_sum[idx]
         if idx == start_idx:
             max_add -= anchor_w
@@ -185,7 +203,6 @@ def _find_bar_patterns(
             if cur_sum + max_add < best_tight[0]:
                 return
 
-        # Poda de folha: se cabe no máximo 1 peça adicional (rem_space < 2 * min_w_global)
         if rem_space < 2 * min_w_global:
             if mode == "top_k":
                 need_min = max(0, w_min_um - cur_sum)
@@ -215,14 +232,13 @@ def _find_bar_patterns(
         nodes += 1
         avail = avail_work[idx]
         if avail <= 0:
-            dfs(idx + 1, cur_sum, cur_count, rem_avail_after_anchor)
+            dfs(idx + 1, cur_sum, cur_count)
             return
 
         w_i = weights[idx]
         max_take = min(avail, rem_space // w_i)
         if mode == "conserve_small" and best_conserve is not None:
-            best_cnt = -best_conserve[0]
-            max_take = min(max_take, max(0, best_cnt - cur_count))
+            max_take = min(max_take, max(0, (-best_conserve[0]) - cur_count))
 
         for take in range(max_take, -1, -1):
             if nodes >= node_limit:
@@ -242,9 +258,8 @@ def _find_bar_patterns(
                 if new_sum >= w_min_um:
                     record_candidate(new_sum, new_count)
 
-            # Em conserve_small, se já atingimos w_min_um com `take`, estender só aumenta peças
             if not (mode == "conserve_small" and take > 0 and new_sum >= w_min_um):
-                dfs(idx + 1, new_sum, new_count, rem_avail_after_anchor)
+                dfs(idx + 1, new_sum, new_count)
 
             if take > 0:
                 prev_q = cur_pattern[idx] - take
@@ -253,7 +268,7 @@ def _find_bar_patterns(
                 else:
                     cur_pattern[idx] = prev_q
 
-    dfs(start_idx, anchor_w, 1, suffix_sum[start_idx] - anchor_w)
+    dfs(start_idx, anchor_w, 1)
 
     if mode == "tightest":
         return [best_tight[2]] if best_tight is not None else []
@@ -271,371 +286,6 @@ def _find_bar_patterns(
             if len(unique_patterns) >= max_patterns:
                 break
     return unique_patterns
-
-
-def _greedy_largest_first(
-    weights: List[int],
-    counts: List[int],
-    w_min_um: int,
-    cap_um: int,
-    mode: str,
-) -> Tuple[List[Dict[int, int]], List[int]]:
-    rem = list(counts)
-    bars: List[Dict[int, int]] = []
-    m = len(weights)
-    anchor = 0
-    node_limit = 800 if mode == "conserve_small" else 2000
-
-    while anchor < m:
-        if rem[anchor] <= 0:
-            anchor += 1
-            continue
-        rem_total = sum(weights[i] * rem[i] for i in range(anchor, m))
-        if rem_total < w_min_um:
-            break
-        patterns = _find_bar_patterns(
-            weights,
-            rem,
-            w_min_um,
-            cap_um,
-            anchor,
-            mode=mode,
-            max_patterns=1,
-            node_limit=node_limit,
-        )
-        if not patterns:
-            anchor += 1
-            continue
-        pat = patterns[0]
-        bars.append(pat)
-        for idx, q in pat.items():
-            rem[idx] -= q
-
-    return bars, rem
-
-
-def _bfd_seeded_solve(
-    weights: List[int],
-    counts: List[int],
-    w_min_um: int,
-    cap_um: int,
-) -> Tuple[List[Dict[int, int]], List[int]]:
-    """Best-Fit Decreasing mantendo bins que atingiram [w_min_um, cap_um] e reotimizando o resto."""
-    bins: List[Tuple[int, Dict[int, int]]] = []  # (remaining_space, pattern)
-    for idx, q in enumerate(counts):
-        w = weights[idx]
-        for _ in range(q):
-            best_b = -1
-            best_rem = cap_um + 1
-            for b_idx, (b_rem, _) in enumerate(bins):
-                if w <= b_rem < best_rem:
-                    best_rem = b_rem
-                    best_b = b_idx
-                    if b_rem == w:
-                        break
-            if best_b >= 0:
-                old_rem, pat = bins[best_b]
-                pat[idx] = pat.get(idx, 0) + 1
-                bins[best_b] = (old_rem - w, pat)
-            else:
-                bins.append((cap_um - w, {idx: 1}))
-
-    closed_bars: List[Dict[int, int]] = []
-    leftover = [0] * len(weights)
-    for b_rem, pat in bins:
-        used = cap_um - b_rem
-        if w_min_um <= used <= cap_um:
-            closed_bars.append(pat)
-        else:
-            for idx, q in pat.items():
-                leftover[idx] += q
-
-    extra_bars, final_rem = _greedy_largest_first(
-        weights, leftover, w_min_um, cap_um, mode="tightest"
-    )
-    return closed_bars + extra_bars, final_rem
-
-
-def _score_solution(
-    bars: List[Dict[int, int]], weights: List[int]
-) -> Tuple[int, int, int]:
-    total_packed = sum(weights[i] * q for pat in bars for i, q in pat.items())
-    total_pieces = sum(q for pat in bars for q in pat.values())
-    return (len(bars), total_packed, -total_pieces)
-
-
-def _improve_by_swaps(
-    bars: List[Dict[int, int]],
-    rem: List[int],
-    weights: List[int],
-    w_min_um: int,
-    cap_um: int,
-) -> Tuple[List[Dict[int, int]], List[int]]:
-    """Tenta trocas 1-por-1 e 1-por-2 entre barras fechadas e sobras para fechar novas barras."""
-    bars = [dict(b) for b in bars]
-    rem = list(rem)
-    m = len(weights)
-
-    def try_extract_new_bars(trial_rem: List[int]) -> Optional[Tuple[List[Dict[int, int]], List[int]]]:
-        if sum(weights[i] * trial_rem[i] for i in range(m)) < w_min_um:
-            return None
-        new_bars, after_rem = _greedy_largest_first(
-            weights, trial_rem, w_min_um, cap_um, mode="tightest"
-        )
-        if new_bars:
-            return new_bars, after_rem
-        return None
-
-    for _ in range(40):
-        improved = False
-        rem_indices = [i for i in range(m) if rem[i] > 0]
-        if not rem_indices:
-            break
-
-        for b_idx, pat in enumerate(bars):
-            bar_sum = sum(weights[i] * q for i, q in pat.items())
-            out_candidates = sorted(pat.keys())
-
-            # Caso A: troca 1 peça da barra por 1 peça das sobras
-            for out_i in out_candidates:
-                base_sum = bar_sum - weights[out_i]
-                for in_i in rem_indices:
-                    if in_i == out_i:
-                        continue
-                    new_bar_sum = base_sum + weights[in_i]
-                    if not (w_min_um <= new_bar_sum <= cap_um):
-                        continue
-                    trial_rem = list(rem)
-                    trial_rem[out_i] += 1
-                    trial_rem[in_i] -= 1
-                    extracted = try_extract_new_bars(trial_rem)
-                    if extracted is not None:
-                        new_bars, after_rem = extracted
-                        pat[out_i] -= 1
-                        if pat[out_i] <= 0:
-                            del pat[out_i]
-                        pat[in_i] = pat.get(in_i, 0) + 1
-                        bars.extend(new_bars)
-                        rem = after_rem
-                        improved = True
-                        break
-                if improved:
-                    break
-            if improved:
-                break
-
-            # Caso B: troca 1 peça da barra por 2 peças das sobras (para m moderado)
-            if m <= 35:
-                for out_i in out_candidates:
-                    base_sum = bar_sum - weights[out_i]
-                    for pos1, in1 in enumerate(rem_indices):
-                        if in1 == out_i:
-                            continue
-                        for in2 in rem_indices[pos1:]:
-                            if in2 == out_i:
-                                continue
-                            if in1 == in2 and rem[in1] < 2:
-                                continue
-                            new_bar_sum = base_sum + weights[in1] + weights[in2]
-                            if not (w_min_um <= new_bar_sum <= cap_um):
-                                continue
-                            trial_rem = list(rem)
-                            trial_rem[out_i] += 1
-                            trial_rem[in1] -= 1
-                            trial_rem[in2] -= 1
-                            extracted = try_extract_new_bars(trial_rem)
-                            if extracted is not None:
-                                new_bars, after_rem = extracted
-                                pat[out_i] -= 1
-                                if pat[out_i] <= 0:
-                                    del pat[out_i]
-                                pat[in1] = pat.get(in1, 0) + 1
-                                pat[in2] = pat.get(in2, 0) + 1
-                                bars.extend(new_bars)
-                                rem = after_rem
-                                improved = True
-                                break
-                        if improved:
-                            break
-                    if improved:
-                        break
-                if improved:
-                    break
-
-        if not improved:
-            break
-
-    return bars, rem
-
-
-def _polish_waste(
-    bars: List[Dict[int, int]],
-    rem: List[int],
-    weights: List[int],
-    cap_um: int,
-) -> Tuple[List[Dict[int, int]], List[int]]:
-    """Trocas 1-por-1 que reduzem estritamente a perda das barras já fechadas."""
-    bars = [dict(b) for b in bars]
-    rem = list(rem)
-    m = len(weights)
-
-    for _ in range(40):
-        improved = False
-        for pat in bars:
-            bar_sum = sum(weights[i] * q for i, q in pat.items())
-            if bar_sum == cap_um:
-                continue
-            max_gain = cap_um - bar_sum
-            for out_i in list(pat.keys()):
-                w_out = weights[out_i]
-                for in_i in range(m):
-                    if rem[in_i] <= 0:
-                        continue
-                    diff = weights[in_i] - w_out
-                    if 0 < diff <= max_gain:
-                        pat[out_i] -= 1
-                        if pat[out_i] <= 0:
-                            del pat[out_i]
-                        pat[in_i] = pat.get(in_i, 0) + 1
-                        rem[in_i] -= 1
-                        rem[out_i] += 1
-                        improved = True
-                        break
-                if improved:
-                    break
-            if improved:
-                break
-        if not improved:
-            break
-
-    return bars, rem
-
-
-def _solve_counts(
-    weights: List[int],
-    counts: List[int],
-    w_min_um: int,
-    cap_um: int,
-) -> List[Dict[int, int]]:
-    """Otimiza quantidade máxima de barras válidas dentro de [w_min_um, cap_um]."""
-    m = len(weights)
-    if m == 0:
-        return []
-    total_w = sum(weights[i] * counts[i] for i in range(m))
-    if total_w < w_min_um:
-        return []
-
-    ub = total_w // w_min_um
-
-    # Estágio 1: Portfólio rápido de 3 heurísticas
-    candidates = [
-        _greedy_largest_first(weights, counts, w_min_um, cap_um, mode="tightest"),
-        _greedy_largest_first(weights, counts, w_min_um, cap_um, mode="conserve_small"),
-        _bfd_seeded_solve(weights, counts, w_min_um, cap_um),
-    ]
-
-    best_bars, best_rem = max(
-        candidates, key=lambda pair: _score_solution(pair[0], weights)
-    )
-
-    # Estágio 2a: Trocas entre barras e sobras
-    if len(best_bars) < ub:
-        swapped_bars, swapped_rem = _improve_by_swaps(
-            best_bars, best_rem, weights, w_min_um, cap_um
-        )
-        if _score_solution(swapped_bars, weights) > _score_solution(best_bars, weights):
-            best_bars, best_rem = swapped_bars, swapped_rem
-
-    # Estágio 2b: Backtracking multi-barras limitado se ainda abaixo do upper bound
-    if len(best_bars) < ub:
-        best_score = _score_solution(best_bars, weights)
-        budget = [400]
-        best_bt: Optional[Tuple[List[Dict[int, int]], List[int]]] = None
-
-        def bt(rem_cur: List[int], start_idx: int, cur_bars: List[Dict[int, int]]) -> None:
-            nonlocal best_score, best_bt
-            if budget[0] <= 0 or best_score[0] >= ub:
-                return
-            budget[0] -= 1
-
-            rem_sum = sum(weights[i] * rem_cur[i] for i in range(start_idx, m))
-            if len(cur_bars) + (rem_sum // w_min_um) <= best_score[0]:
-                return
-
-            anchor = start_idx
-            while anchor < m and rem_cur[anchor] <= 0:
-                anchor += 1
-
-            if anchor >= m or rem_sum < w_min_um:
-                sc = _score_solution(cur_bars, weights)
-                if sc > best_score:
-                    best_score = sc
-                    best_bt = ([dict(p) for p in cur_bars], list(rem_cur))
-                return
-
-            # Gera diversidade de padrões: tightest + conserve_small + top_k
-            raw_pats: List[Dict[int, int]] = []
-            for m_mode, k_lim in (("tightest", 1), ("conserve_small", 1), ("top_k", 4)):
-                raw_pats.extend(
-                    _find_bar_patterns(
-                        weights,
-                        rem_cur,
-                        w_min_um,
-                        cap_um,
-                        anchor,
-                        mode=m_mode,
-                        max_patterns=k_lim,
-                        node_limit=350,
-                    )
-                )
-
-            dedup_pats: List[Dict[int, int]] = []
-            seen_sigs = set()
-            for pat in raw_pats:
-                sig = tuple(sorted(pat.items()))
-                if sig not in seen_sigs:
-                    seen_sigs.add(sig)
-                    dedup_pats.append(pat)
-                    if len(dedup_pats) >= 5:
-                        break
-
-            for pat in dedup_pats:
-                next_rem = list(rem_cur)
-                for idx, q in pat.items():
-                    next_rem[idx] -= q
-                cur_bars.append(pat)
-                bt(next_rem, anchor, cur_bars)
-                cur_bars.pop()
-                if best_score[0] >= ub or budget[0] <= 0:
-                    return
-
-            # Ramo de pular completamente `anchor` caso valha a pena
-            rem_without_anchor = rem_sum - weights[anchor] * rem_cur[anchor]
-            if len(cur_bars) + (rem_without_anchor // w_min_um) > best_score[0]:
-                bt(rem_cur, anchor + 1, cur_bars)
-
-        bt(list(counts), 0, [])
-        if best_bt is not None and _score_solution(best_bt[0], weights) > _score_solution(
-            best_bars, weights
-        ):
-            best_bars, best_rem = best_bt
-
-    # Estágio 2c: Polimento de perda mantendo o número máximo de barras
-    best_bars, best_rem = _polish_waste(best_bars, best_rem, weights, cap_um)
-
-    # Garantia explícita de invariante: nunca consumir além de `counts`
-    used_check = [0] * m
-    valid_bars: List[Dict[int, int]] = []
-    for pat in best_bars:
-        pat_sum = sum(weights[i] * q for i, q in pat.items())
-        if not (w_min_um <= pat_sum <= cap_um):
-            continue
-        if all(used_check[i] + q <= counts[i] for i, q in pat.items()):
-            for i, q in pat.items():
-                used_check[i] += q
-            valid_bars.append(pat)
-
-    return valid_bars
 
 
 def _bin_pack_bfd(
@@ -730,7 +380,7 @@ def _reduce_bins_3_to_2(
     cap_um: int,
     lb: int,
 ) -> List[Dict[int, int]]:
-    """Tenta fundir 3 bins subutilizados em 2 bins exatos quando acima do lower bound."""
+    """Funde 3 bins subutilizados em 2 bins exatos quando acima do lower bound."""
     bins = [dict(b) for b in bins]
     for _ in range(30):
         if len(bins) <= lb or len(bins) < 3:
@@ -740,7 +390,6 @@ def _reduce_bins_3_to_2(
         reduced = False
 
         n = len(bins)
-        # Prioriza combinações envolvendo os bins mais vazios no início da lista
         tail_limit = min(n - 2, 4)
         for t in range(tail_limit):
             for i in range(t + 1, n - 1):
@@ -824,10 +473,8 @@ def _concentrate_scrap(
             if space_hi <= 0:
                 continue
             for lo in range(n - 1, hi, -1):
-                # 1) Mover 1 peça de lo -> hi se couber
                 for idx in sorted(bins[lo].keys()):
-                    w_move = weights[idx]
-                    if w_move <= space_hi:
+                    if weights[idx] <= space_hi:
                         bins[hi][idx] = bins[hi].get(idx, 0) + 1
                         bins[lo][idx] -= 1
                         if bins[lo][idx] <= 0:
@@ -839,7 +486,6 @@ def _concentrate_scrap(
                 if improved:
                     break
 
-                # 2) Trocar 1 menor de hi por 1 maior de lo aumentando fill(hi)
                 for idx_hi in sorted(bins[hi].keys(), reverse=True):
                     w_hi = weights[idx_hi]
                     for idx_lo in sorted(bins[lo].keys()):
@@ -901,7 +547,6 @@ def _pack_min_bars(
 
     best_bins = _concentrate_scrap(best_bins, weights, cap_um)
 
-    # Garantia explícita de invariante: soma <= cap_um e consumo exato de counts
     used_check = [0] * m
     valid_bins: List[Dict[int, int]] = []
     for pat in best_bins:
@@ -919,81 +564,734 @@ def _pack_min_bars(
     return valid_bins
 
 
-def _format_padrao_corte(pieces: List[Dict[str, Any]]) -> str:
-    """Formata o padrão de corte da barra em ordem decrescente de medida."""
-    counts: Dict[float, int] = Counter()
-    for p in pieces:
-        counts[float(p["medida_corte_mm"])] += 1
-    parts = []
-    for med in sorted(counts.keys(), reverse=True):
-        med_str = f"{med:g}"
-        parts.append(f"{counts[med]}× {med_str} mm")
-    return " + ".join(parts)
+def _orient_piece_for_angle(
+    piece: Dict[str, Any],
+    cur_angle: Optional[int],
+    next_hint: Optional[int] = None,
+    keep_internal: bool = False,
+) -> Tuple[Dict[str, Any], int]:
+    """Orienta peça assimétrica (45°/90°) para casar com o ângulo atual da serra."""
+    a_esq = _norm_angle(piece.get("angulo_esq"), 45)
+    a_dir = _norm_angle(piece.get("angulo_dir"), 45)
+    if a_esq != a_dir:
+        if cur_angle == 45:
+            a_esq, a_dir = 45, 90
+        elif cur_angle == 90:
+            a_esq, a_dir = 90, 45
+        elif next_hint == 90:
+            a_esq, a_dir = 45, 90
+        elif next_hint == 45:
+            a_esq, a_dir = 90, 45
+        else:
+            a_esq, a_dir = 45, 90
+
+    out_p = dict(piece) if keep_internal else {k: v for k, v in piece.items() if not k.startswith("_")}
+    out_p["angulo_esq"] = a_esq
+    out_p["angulo_dir"] = a_dir
+    out_p["angulos_corte"] = _format_angles(a_esq, a_dir)
+    return out_p, a_dir
 
 
-def _materialize_bars(
+def _order_pieces_by_angle(
+    pieces: List[Dict[str, Any]],
+    start_angle: Optional[int],
+    end_hint: Optional[int] = None,
+    keep_internal: bool = False,
+) -> Tuple[List[Dict[str, Any]], Optional[int]]:
+    """Ordena e orienta peças agrupando por ângulo e encadeando peças 45°/90°."""
+    if not pieces:
+        return [], start_angle
+
+    ordered_src = sorted(
+        pieces, key=lambda x: (x["data_entrega"], x["op"], x["codigo"])
+    )
+    pure_45: List[Dict[str, Any]] = []
+    mixed: List[Dict[str, Any]] = []
+    pure_90: List[Dict[str, Any]] = []
+
+    for p in ordered_src:
+        sig = p.get("_ang_sig")
+        if sig is None:
+            sig = _angle_sig(*_resolve_bar_angles(p))
+        if sig == (45, 45):
+            pure_45.append(p)
+        elif sig == (90, 90):
+            pure_90.append(p)
+        else:
+            mixed.append(p)
+
+    if start_angle in (45, 90):
+        first_ang = start_angle
+    elif end_hint in (45, 90):
+        opp = 90 if end_hint == 45 else 45
+        if (opp == 45 and pure_45) or (opp == 90 and pure_90) or mixed:
+            first_ang = opp
+        else:
+            first_ang = end_hint
+    else:
+        first_ang = 45 if len(pure_45) >= len(pure_90) else 90
+
+    other_ang = 90 if first_ang == 45 else 45
+    first_pure = pure_45 if first_ang == 45 else pure_90
+    second_pure = pure_90 if first_ang == 45 else pure_45
+
+    if second_pure:
+        mixed_next_hint: Optional[int] = other_ang
+    elif end_hint in (45, 90):
+        mixed_next_hint = end_hint
+    else:
+        mixed_next_hint = None
+
+    out: List[Dict[str, Any]] = []
+    cur_angle = start_angle
+
+    for p in first_pure:
+        cp, cur_angle = _orient_piece_for_angle(
+            p, cur_angle, mixed_next_hint, keep_internal=keep_internal
+        )
+        out.append(cp)
+
+    for idx_m, p in enumerate(mixed):
+        hint = mixed_next_hint if idx_m == len(mixed) - 1 else None
+        cp, cur_angle = _orient_piece_for_angle(
+            p, cur_angle, hint, keep_internal=keep_internal
+        )
+        out.append(cp)
+
+    for p in second_pure:
+        cp, cur_angle = _orient_piece_for_angle(
+            p, cur_angle, end_hint, keep_internal=keep_internal
+        )
+        out.append(cp)
+
+    return out, cur_angle
+
+
+def _pop_pieces_for_weight(
+    w_buckets: Dict[Tuple[int, int], deque],
+    qty: int,
+    cur_angle: Optional[int],
+) -> List[Dict[str, Any]]:
+    """Retira `qty` peças do peso `w`, priorizando o ângulo atual da serra."""
+    if cur_angle in (45, 90):
+        opp = 90 if cur_angle == 45 else 45
+        sig_order: List[Tuple[int, int]] = [(cur_angle, cur_angle), (45, 90), (opp, opp)]
+    else:
+        n45 = len(w_buckets.get((45, 45), ()))
+        n90 = len(w_buckets.get((90, 90), ()))
+        if n45 >= n90:
+            sig_order = [(45, 45), (45, 90), (90, 90)]
+        else:
+            sig_order = [(90, 90), (45, 90), (45, 45)]
+
+    for sig in w_buckets.keys():
+        if sig not in sig_order:
+            sig_order.append(sig)
+
+    picked: List[Dict[str, Any]] = []
+    for sig in sig_order:
+        dq = w_buckets.get(sig)
+        while dq and len(picked) < qty:
+            picked.append(dq.popleft())
+        if len(picked) >= qty:
+            break
+    return picked
+
+
+def _assign_and_order_material_bars(
     patterns: List[Dict[int, int]],
     weights: List[int],
-    buckets: Dict[int, deque],
+    buckets_by_w_sig: Dict[int, Dict[Tuple[int, int], deque]],
+) -> List[List[Dict[str, Any]]]:
+    """Encadeia barras e orienta cortes para reduzir trocas de medida e de ângulo."""
+    rem: List[Counter[int]] = []
+    for pat in patterns:
+        c: Counter[int] = Counter()
+        for idx, q in pat.items():
+            if q > 0:
+                c[weights[idx]] += q
+        if c:
+            rem.append(c)
+
+    def _w_has_angle_match(w: int, ang: Optional[int]) -> bool:
+        if ang not in (45, 90):
+            return False
+        wb = buckets_by_w_sig.get(w)
+        if not wb:
+            return False
+        return bool(wb.get((ang, ang)) or wb.get((45, 90)))
+
+    ordered_bars: List[List[Dict[str, Any]]] = []
+    last_med: Optional[int] = None
+    last_angle: Optional[int] = None
+
+    while rem:
+        best_i = 0
+        best_key: Optional[Tuple[int, int, int, int, int, int, int]] = None
+        for i, c in enumerate(rem):
+            has_med = 1 if (last_med is not None and last_med in c) else 0
+            is_mono = 1 if len(c) == 1 else 0
+            has_med_ang = (
+                1 if (has_med and _w_has_angle_match(last_med, last_angle)) else 0
+            )
+            has_any_ang = (
+                1
+                if (
+                    last_angle in (45, 90)
+                    and any(_w_has_angle_match(w, last_angle) for w in c)
+                )
+                else 0
+            )
+            key = (
+                has_med_ang,
+                has_med,
+                1 if (has_med and is_mono) else 0,
+                has_any_ang,
+                -len(c),
+                max(c.keys()),
+                sum(w * q for w, q in c.items()),
+            )
+            if best_key is None or key > best_key:
+                best_key = key
+                best_i = i
+
+        cur_c = rem.pop(best_i)
+        rem_freq: Counter[int] = Counter()
+        for c in rem:
+            for w in c:
+                rem_freq[w] += 1
+
+        distinct = sorted(cur_c.keys(), reverse=True)
+        bar_pieces: List[Dict[str, Any]] = []
+        cur_angle = last_angle
+        last_w_used: Optional[int] = None
+
+        if len(distinct) == 1:
+            w0 = distinct[0]
+            raw_pcs = _pop_pieces_for_weight(buckets_by_w_sig[w0], cur_c[w0], cur_angle)
+            bar_pieces, cur_angle = _order_pieces_by_angle(raw_pcs, cur_angle)
+            last_w_used = w0
+        else:
+            if last_med is not None and last_med in cur_c:
+                first_m = last_med
+            elif last_angle in (45, 90):
+                ang_cands = [w for w in distinct if _w_has_angle_match(w, last_angle)]
+                first_m = ang_cands[0] if ang_cands else distinct[0]
+            else:
+                first_m = distinct[0]
+
+            others = [w for w in distinct if w != first_m]
+            last_m = max(others, key=lambda w: (rem_freq[w], w))
+            middles = [w for w in others if w != last_m]
+
+            # Processa first_m
+            raw_first = _pop_pieces_for_weight(
+                buckets_by_w_sig[first_m], cur_c[first_m], cur_angle
+            )
+            pcs_first, cur_angle = _order_pieces_by_angle(raw_first, cur_angle)
+            bar_pieces.extend(pcs_first)
+
+            # Processa middles priorizando continuidade de ângulo
+            rem_middles = list(middles)
+            while rem_middles:
+                match_idx = next(
+                    (
+                        idx_m
+                        for idx_m, wm in enumerate(rem_middles)
+                        if _w_has_angle_match(wm, cur_angle)
+                    ),
+                    0,
+                )
+                wm = rem_middles.pop(match_idx)
+                raw_mid = _pop_pieces_for_weight(
+                    buckets_by_w_sig[wm], cur_c[wm], cur_angle
+                )
+                pcs_mid, cur_angle = _order_pieces_by_angle(raw_mid, cur_angle)
+                bar_pieces.extend(pcs_mid)
+
+            # Processa last_m
+            raw_last = _pop_pieces_for_weight(
+                buckets_by_w_sig[last_m], cur_c[last_m], cur_angle
+            )
+            pcs_last, cur_angle = _order_pieces_by_angle(raw_last, cur_angle)
+            bar_pieces.extend(pcs_last)
+            last_w_used = last_m
+
+        ordered_bars.append(bar_pieces)
+        if bar_pieces:
+            last_med = last_w_used
+            last_angle = cur_angle
+
+    return ordered_bars
+
+
+def _format_sequence_rle(pieces: List[Dict[str, Any]]) -> str:
+    """Formata a sequência exata de cortes na barra (esquerda → direita) agrupando adjacentes."""
+    if not pieces:
+        return ""
+    runs: List[Tuple[float, int, int, int]] = []
+    for p in pieces:
+        med = round(float(p["medida_corte_mm"]), 3)
+        a_esq = _norm_angle(p.get("angulo_esq"), 45)
+        a_dir = _norm_angle(p.get("angulo_dir"), 45)
+        sig_a, sig_b = _angle_sig(a_esq, a_dir)
+        if (
+            runs
+            and runs[-1][0] == med
+            and runs[-1][1] == sig_a
+            and runs[-1][2] == sig_b
+        ):
+            runs[-1] = (med, sig_a, sig_b, runs[-1][3] + 1)
+        else:
+            runs.append((med, sig_a, sig_b, 1))
+    return " → ".join(
+        f"{q}× {med:g} mm [{a1}°/{a2}°]" for med, a1, a2, q in runs
+    )
+
+
+def _annotate_and_count_adjustments(
+    bars: List[Dict[str, Any]], count_measure_adjustments: bool = True
+) -> Tuple[int, int]:
+    """Conta trocas consecutivas de medida e trocas de ângulo (45° ↔ 90°)."""
+    total_med_changes = 0
+    total_angle_changes = 0
+    prev_med: Optional[float] = None
+    prev_angle: Optional[int] = None
+
+    for bar in bars:
+        internal_med = 0
+        entry_med = False
+        internal_ang = 0
+        entry_ang = False
+        angles_seen: List[str] = []
+        angles_seen_set = set()
+
+        for idx, p in enumerate(bar["pecas"]):
+            med = round(float(p["medida_corte_mm"]), 3)
+            a_esq = _norm_angle(p.get("angulo_esq"), 45)
+            a_dir = _norm_angle(p.get("angulo_dir"), 45)
+            canon = _format_angles(*_angle_sig(a_esq, a_dir))
+            if canon not in angles_seen_set:
+                angles_seen_set.add(canon)
+                angles_seen.append(canon)
+
+            if count_measure_adjustments and prev_med is not None and med != prev_med:
+                total_med_changes += 1
+                if idx == 0:
+                    entry_med = True
+                else:
+                    internal_med += 1
+            prev_med = med
+
+            p_entry_ang = False
+            if prev_angle is not None and a_esq != prev_angle:
+                total_angle_changes += 1
+                p_entry_ang = True
+                if idx == 0:
+                    entry_ang = True
+                else:
+                    internal_ang += 1
+
+            p_intra_ang = a_esq != a_dir
+            if p_intra_ang:
+                total_angle_changes += 1
+                internal_ang += 1
+
+            p["troca_angulo_entrada"] = p_entry_ang
+            p["troca_angulo_interna"] = p_intra_ang
+            prev_angle = a_dir
+
+        if count_measure_adjustments:
+            bar["troca_entrada"] = entry_med
+            bar["ajustes_internos"] = internal_med
+            bar["ajustes_barra"] = internal_med + (1 if entry_med else 0)
+
+        bar["troca_angulo_entrada"] = entry_ang
+        bar["trocas_angulo_internas"] = internal_ang
+        bar["trocas_angulo_barra"] = internal_ang + (1 if entry_ang else 0)
+        bar["angulos_resumo"] = ", ".join(sorted(angles_seen))
+
+    return total_med_changes, total_angle_changes
+
+
+def _calc_pair_overlap_um(prev_p: Dict[str, Any], curr_p: Dict[str, Any]) -> int:
+    """Retorna economia de chanfro (µm) em junção // entre duas peças 45° simétricas."""
+    if (
+        _norm_angle(prev_p.get("angulo_dir"), 45) == 45
+        and _norm_angle(curr_p.get("angulo_esq"), 45) == 45
+        and bool(prev_p.get("perfil_simetrico"))
+        and bool(curr_p.get("perfil_simetrico"))
+    ):
+        w_prev = _to_um(prev_p.get("largura_perfil_mm") or 0.0)
+        w_curr = _to_um(curr_p.get("largura_perfil_mm") or 0.0)
+        c_prev = _to_um(prev_p["medida_corte_mm"])
+        c_curr = _to_um(curr_p["medida_corte_mm"])
+        return max(0, min(w_prev, w_curr, c_prev // 2, c_curr // 2))
+    return 0
+
+
+def _apply_bar_nesting(clean_pieces: List[Dict[str, Any]]) -> Tuple[int, int, int]:
+    """Anota orientação (invertida), junção (// vs \\/) e economia de chanfro."""
+    total_econ_um = 0
+    cortes_paralelos = 0
+    cortes_v = 0
+    prev_inv = False
+
+    for i, p in enumerate(clean_pieces):
+        if i == 0:
+            p["invertida"] = False
+            p["juncao_entrada"] = ""
+            p["economia_chanfro_mm"] = 0.0
+            prev_inv = False
+            continue
+
+        prev_p = clean_pieces[i - 1]
+        prev_dir = _norm_angle(prev_p.get("angulo_dir"), 45)
+        curr_esq = _norm_angle(p.get("angulo_esq"), 45)
+
+        if prev_dir == 45 and curr_esq == 45:
+            if bool(prev_p.get("perfil_simetrico")) and bool(p.get("perfil_simetrico")):
+                inv = not prev_inv
+                ov_um = _calc_pair_overlap_um(prev_p, p)
+                p["invertida"] = inv
+                p["juncao_entrada"] = "//"
+                p["economia_chanfro_mm"] = _from_um(ov_um)
+                total_econ_um += ov_um
+                cortes_paralelos += 1
+                prev_inv = inv
+            else:
+                p["invertida"] = False
+                p["juncao_entrada"] = "\\/"
+                p["economia_chanfro_mm"] = 0.0
+                cortes_v += 1
+                prev_inv = False
+        else:
+            p["invertida"] = False
+            p["juncao_entrada"] = "||" if (prev_dir == 90 and curr_esq == 90) else "45↔90"
+            p["economia_chanfro_mm"] = 0.0
+            prev_inv = False
+
+    return total_econ_um, cortes_paralelos, cortes_v
+
+
+def _build_bar_dict(
+    cenario: str,
+    gm: Dict[str, Any],
+    barra_numero: int,
+    clean_pieces: List[Dict[str, Any]],
+    cfg: OptimizationConfig,
+    L_um: int,
+    D_um: int,
+    K_um: int,
+) -> Dict[str, Any]:
+    econ_um, cortes_par, cortes_v = _apply_bar_nesting(clean_pieces)
+    soma_pecas_um = sum(_to_um(p["medida_corte_mm"]) for p in clean_pieces)
+    material_util_um = max(0, soma_pecas_um - econ_um)
+    kerfs_um = max(0, len(clean_pieces) - 1) * K_um
+    serra_desp_um = D_um + kerfs_um
+    consumido_um = D_um + material_util_um + kerfs_um
+    sobra_um = max(0, L_um - consumido_um)
+    perda_mm = _from_um(sobra_um)
+    seq_str = _format_sequence_rle(clean_pieces)
+    ops_sorted = sorted({p["op"] for p in clean_pieces if p.get("op")})
+    perfil_sim = bool(clean_pieces) and all(
+        bool(p.get("perfil_simetrico")) for p in clean_pieces
+    )
+
+    return {
+        "cenario": cenario,
+        "grupo_key": gm["grupo_key"],
+        "grupo_nome": gm["grupo_nome"],
+        "origem_agrupamento": gm["origem_agrupamento"],
+        "codigo_perfil": gm["codigo_perfil"],
+        "barra_numero": barra_numero,
+        "comprimento_barra_mm": round(cfg.comprimento_barra_mm, 3),
+        "qtd_pecas": len(clean_pieces),
+        "soma_pecas_mm": _from_um(soma_pecas_um),
+        "perda_serra_desponte_mm": _from_um(serra_desp_um),
+        "consumido_mm": _from_um(consumido_um),
+        "perda_mm": perda_mm,
+        "perda_cm": round(perda_mm / 10.0, 2),
+        "aproveitamento_pct": round(min(100.0, (material_util_um / L_um) * 100.0), 2),
+        "perfil_simetrico": perfil_sim,
+        "modo_juncao_45": "// (Girar)" if perfil_sim else "\\/ (Sem giro)",
+        "economia_chanfro_mm": _from_um(econ_um),
+        "cortes_paralelos_qtd": cortes_par,
+        "cortes_v_qtd": cortes_v,
+        "padrao_corte": seq_str,
+        "sequencia_corte": seq_str,
+        "ops": ", ".join(ops_sorted[:10])
+        + (f" (+{len(ops_sorted) - 10})" if len(ops_sorted) > 10 else ""),
+        "pecas": clean_pieces,
+        "troca_entrada": False,
+        "ajustes_internos": 0,
+        "ajustes_barra": 0,
+        "angulos_resumo": "",
+        "troca_angulo_entrada": False,
+        "trocas_angulo_internas": 0,
+        "trocas_angulo_barra": 0,
+    }
+
+
+def _build_material_group(
+    eligible: List[Dict[str, Any]],
     gm: Dict[str, Any],
     cfg: OptimizationConfig,
     L_um: int,
     D_um: int,
     K_um: int,
-    grupo_otimizacao: int,
-) -> List[Dict[str, Any]]:
-    """Converte padrões abstratos de corte em registros detalhados ordenados."""
-    bars: List[Dict[str, Any]] = []
-    for pat in patterns:
-        bar_pieces: List[Dict[str, Any]] = []
-        for idx, q in pat.items():
-            w = weights[idx]
-            for _ in range(q):
-                bar_pieces.append(buckets[w].popleft())
+    cap_um: int,
+) -> Tuple[List[Dict[str, Any]], int, int]:
+    """Cenário 1: otimização global de material + encadeamento de medidas e ângulos."""
+    usable_um = max(1, L_um - D_um)
+    homogeneous_sym_w_um = 0
+    if eligible:
+        first_pw = eligible[0]["_prof_w_um"]
+        if (
+            first_pw > 0
+            and all(
+                bool(p["perfil_simetrico"])
+                and p["_ang_sig"] == (45, 45)
+                and p["_prof_w_um"] == first_pw
+                and first_pw <= p["_c_um"] // 2
+                and (p["_c_um"] + K_um - first_pw) > 0
+                for p in eligible
+            )
+        ):
+            homogeneous_sym_w_um = first_pw
 
-        bar_pieces.sort(
-            key=lambda x: (-x["medida_corte_mm"], x["op"], x["codigo"])
+    pack_cap_um = max(1, usable_um + K_um - homogeneous_sym_w_um) if homogeneous_sym_w_um > 0 else cap_um
+
+    buckets_by_w_sig: Dict[int, Dict[Tuple[int, int], deque]] = defaultdict(
+        lambda: defaultdict(deque)
+    )
+    weight_counts: Counter[int] = Counter()
+    for p in sorted(
+        eligible, key=lambda x: (x["data_entrega"], x["op"], x["codigo"])
+    ):
+        pack_w = (
+            (p["_c_um"] + K_um - homogeneous_sym_w_um)
+            if homogeneous_sym_w_um > 0
+            else p["_w_um"]
         )
-        soma_pecas_um = sum(p["_c_um"] for p in bar_pieces)
-        kerfs_um = max(0, len(bar_pieces) - 1) * K_um
-        serra_desp_um = D_um + kerfs_um
-        consumido_um = soma_pecas_um + serra_desp_um
-        sobra_um = max(0, L_um - consumido_um)
+        buckets_by_w_sig[pack_w][p["_ang_sig"]].append(p)
+        weight_counts[pack_w] += 1
 
-        clean_pieces = [
-            {k: v for k, v in p.items() if not k.startswith("_")}
-            for p in bar_pieces
-        ]
-        ops_sorted = sorted({p["op"] for p in clean_pieces if p["op"]})
-        perda_mm = _from_um(sobra_um)
+    weights = sorted(weight_counts.keys(), reverse=True)
+    counts = [weight_counts[w] for w in weights]
 
+    patterns = _pack_min_bars(weights, counts, pack_cap_um)
+    ordered_bars = _assign_and_order_material_bars(
+        patterns, weights, buckets_by_w_sig
+    )
+
+    bars: List[Dict[str, Any]] = []
+    for idx_bar, bar_pieces in enumerate(ordered_bars, start=1):
         bars.append(
+            _build_bar_dict("material", gm, idx_bar, bar_pieces, cfg, L_um, D_um, K_um)
+        )
+
+    ajustes, trocas_angulo = _annotate_and_count_adjustments(
+        bars, count_measure_adjustments=True
+    )
+    return bars, ajustes, trocas_angulo
+
+
+def _build_tempo_execucao_group(
+    eligible: List[Dict[str, Any]],
+    gm: Dict[str, Any],
+    cfg: OptimizationConfig,
+    L_um: int,
+    D_um: int,
+    K_um: int,
+    cap_um: int,
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], int, int]:
+    """Cenário 2: corte em lote por medida (maior → menor) com FFD em barras semi-cortadas."""
+    usable_um = max(1, L_um - D_um)
+    by_med: Dict[float, List[Dict[str, Any]]] = defaultdict(list)
+    for p in eligible:
+        by_med[round(float(p["medida_corte_mm"]), 3)].append(p)
+
+    sorted_meds = sorted(by_med.keys(), reverse=True)
+    open_bars: List[Dict[str, Any]] = []
+    roteiro_medidas: List[Dict[str, Any]] = []
+    route_prev_angle: Optional[int] = None
+    total_trocas_angulo_lote = 0
+
+    for passo_idx, med_mm in enumerate(sorted_meds, start=1):
+        pcs_step, _ = _order_pieces_by_angle(
+            by_med[med_mm], start_angle=route_prev_angle, keep_internal=True
+        )
+        trocas_angulo_passo = 0
+        cur_step_ang = route_prev_angle
+        for p in pcs_step:
+            a_e = _norm_angle(p.get("angulo_esq"), 45)
+            a_d = _norm_angle(p.get("angulo_dir"), 45)
+            if cur_step_ang is not None and a_e != cur_step_ang:
+                trocas_angulo_passo += 1
+            if a_e != a_d:
+                trocas_angulo_passo += 1
+            cur_step_ang = a_d
+        route_prev_angle = cur_step_ang
+        total_trocas_angulo_lote += trocas_angulo_passo
+
+        had_pieces_before: Dict[int, bool] = {}
+        sobra_before_um: Dict[int, int] = {}
+        step_allocs_by_bar: Dict[int, List[Dict[str, Any]]] = defaultdict(list)
+
+        for p in pcs_step:
+            c_um = p["_c_um"]
+            placed_bar = None
+            chosen_ov_um = 0
+            chosen_inc_um = c_um
+
+            for bar_state in open_bars:
+                ov_um = _calc_pair_overlap_um(bar_state["pieces"][-1], p)
+                inc_um = c_um + K_um - ov_um
+                if bar_state["consumido_util_um"] + inc_um <= usable_um:
+                    placed_bar = bar_state
+                    chosen_ov_um = ov_um
+                    chosen_inc_um = inc_um
+                    break
+
+            if placed_bar is None:
+                b_num = len(open_bars) + 1
+                placed_bar = {
+                    "barra_numero": b_num,
+                    "consumido_util_um": 0,
+                    "soma_pecas_um": 0,
+                    "econ_um": 0,
+                    "pieces": [],
+                }
+                open_bars.append(placed_bar)
+                had_pieces_before[b_num] = False
+                sobra_before_um[b_num] = max(0, L_um - D_um)
+                chosen_ov_um = 0
+                chosen_inc_um = c_um
+            else:
+                b_num = placed_bar["barra_numero"]
+                if b_num not in had_pieces_before:
+                    had_pieces_before[b_num] = True
+                    sobra_before_um[b_num] = max(
+                        0, L_um - (D_um + placed_bar["consumido_util_um"])
+                    )
+
+            placed_bar["consumido_util_um"] += chosen_inc_um
+            placed_bar["soma_pecas_um"] += c_um
+            placed_bar["econ_um"] += chosen_ov_um
+            clean_p = {k: v for k, v in p.items() if not k.startswith("_")}
+            placed_bar["pieces"].append(clean_p)
+            step_allocs_by_bar[b_num].append(clean_p)
+
+        alocacoes: List[Dict[str, Any]] = []
+        qtd_novas = 0
+        qtd_sobras = 0
+        step_ops = set()
+
+        for b_num in sorted(step_allocs_by_bar.keys()):
+            alloc_pcs = step_allocs_by_bar[b_num]
+            bar_state = open_bars[b_num - 1]
+            eh_sobra = bool(had_pieces_before[b_num])
+            if eh_sobra:
+                qtd_sobras += 1
+                origem_str = f"Sobra da Barra #{b_num}"
+            else:
+                qtd_novas += 1
+                origem_str = "Barra nova"
+
+            sobra_depois_um = max(
+                0, L_um - (D_um + bar_state["consumido_util_um"])
+            )
+            ops_alloc = sorted({p["op"] for p in alloc_pcs if p.get("op")})
+            step_ops.update(ops_alloc)
+            alloc_angles = sorted(
+                {
+                    _format_angles(
+                        *_angle_sig(
+                            _norm_angle(p.get("angulo_esq"), 45),
+                            _norm_angle(p.get("angulo_dir"), 45),
+                        )
+                    )
+                    for p in alloc_pcs
+                }
+            )
+
+            alocacoes.append(
+                {
+                    "barra_numero": b_num,
+                    "barra_global_numero": 0,  # preenchido após ordenação global
+                    "eh_sobra": eh_sobra,
+                    "origem_barra": origem_str,
+                    "qtd_cortes": len(alloc_pcs),
+                    "angulos_corte": ", ".join(alloc_angles),
+                    "sobra_antes_mm": _from_um(sobra_before_um[b_num]),
+                    "sobra_depois_mm": _from_um(sobra_depois_um),
+                    "ops": ", ".join(ops_alloc[:10])
+                    + (f" (+{len(ops_alloc) - 10})" if len(ops_alloc) > 10 else ""),
+                    "pecas": alloc_pcs,
+                }
+            )
+
+        ops_step_sorted = sorted(step_ops)
+        step_angles = sorted(
             {
-                "grupo_otimizacao": grupo_otimizacao,
+                _format_angles(
+                    *_angle_sig(
+                        _norm_angle(p.get("angulo_esq"), 45),
+                        _norm_angle(p.get("angulo_dir"), 45),
+                    )
+                )
+                for p in pcs_step
+            }
+        )
+        roteiro_medidas.append(
+            {
                 "grupo_key": gm["grupo_key"],
                 "grupo_nome": gm["grupo_nome"],
                 "origem_agrupamento": gm["origem_agrupamento"],
                 "codigo_perfil": gm["codigo_perfil"],
-                "barra_numero": 0,
-                "comprimento_barra_mm": round(cfg.comprimento_barra_mm, 3),
-                "qtd_pecas": len(clean_pieces),
-                "soma_pecas_mm": _from_um(soma_pecas_um),
-                "perda_serra_desponte_mm": _from_um(serra_desp_um),
-                "consumido_mm": _from_um(consumido_um),
-                "perda_mm": perda_mm,
-                "perda_cm": round(perda_mm / 10.0, 2),
-                "aproveitamento_pct": round((soma_pecas_um / L_um) * 100.0, 2),
-                "padrao_corte": _format_padrao_corte(clean_pieces),
-                "ops": ", ".join(ops_sorted[:10])
-                + (f" (+{len(ops_sorted) - 10})" if len(ops_sorted) > 10 else ""),
-                "pecas": clean_pieces,
+                "passo": passo_idx,
+                "medida_corte_mm": med_mm,
+                "qtd_total_pecas": len(pcs_step),
+                "total_metros": round((len(pcs_step) * med_mm) / 1000.0, 3),
+                "angulos_corte": ", ".join(step_angles),
+                "troca_medida": passo_idx > 1,
+                "troca_angulo": trocas_angulo_passo > 0,
+                "trocas_angulo_passo": trocas_angulo_passo,
+                "qtd_barras_novas": qtd_novas,
+                "qtd_sobras_reaproveitadas": qtd_sobras,
+                "ops": ", ".join(ops_step_sorted[:10])
+                + (
+                    f" (+{len(ops_step_sorted) - 10})"
+                    if len(ops_step_sorted) > 10
+                    else ""
+                ),
+                "alocacoes": alocacoes,
             }
         )
 
-    bars.sort(key=lambda b: (b["perda_mm"], -b["soma_pecas_mm"], -b["qtd_pecas"]))
-    for i, b in enumerate(bars, start=1):
-        b["barra_numero"] = i
-    return bars
+    bars: List[Dict[str, Any]] = []
+    for bar_state in open_bars:
+        clean_pieces = list(bar_state["pieces"])
+        b_dict = _build_bar_dict(
+            "tempo_execucao",
+            gm,
+            bar_state["barra_numero"],
+            clean_pieces,
+            cfg,
+            L_um,
+            D_um,
+            K_um,
+        )
+        distinct_in_bar = len({p["medida_corte_mm"] for p in clean_pieces})
+        b_dict["troca_entrada"] = False
+        b_dict["ajustes_internos"] = max(0, distinct_in_bar - 1)
+        b_dict["ajustes_barra"] = max(0, distinct_in_bar - 1)
+        bars.append(b_dict)
+
+    _annotate_and_count_adjustments(bars, count_measure_adjustments=False)
+    ajustes_lote = max(0, len(roteiro_medidas) - 1)
+    return bars, roteiro_medidas, ajustes_lote, total_trocas_angulo_lote
 
 
 def _calc_avg_yield_and_loss(
@@ -1006,29 +1304,108 @@ def _calc_avg_yield_and_loss(
     return aproveitamento, perda_media
 
 
+def _assemble_scenario_payload(
+    scenario_id: str,
+    nome: str,
+    descricao: str,
+    grupos_out: List[Dict[str, Any]],
+    barra_mm: float,
+    include_roteiro: bool = False,
+) -> Dict[str, Any]:
+    grupos_sorted = sorted(
+        grupos_out,
+        key=lambda g: (-g["qtd_barras"], -g["total_pecas_entrada"], g["grupo_nome"]),
+    )
+
+    barras_flat: List[Dict[str, Any]] = []
+    global_map: Dict[Tuple[str, int], int] = {}
+    for g in sorted(grupos_sorted, key=lambda x: x["grupo_nome"]):
+        for b in g["barras"]:
+            barras_flat.append(dict(b))
+    for i, b in enumerate(barras_flat, start=1):
+        b["barra_global_numero"] = i
+        global_map[(b["grupo_key"], b["barra_numero"])] = i
+
+    for g in grupos_sorted:
+        for b in g["barras"]:
+            b["barra_global_numero"] = global_map[(b["grupo_key"], b["barra_numero"])]
+        if include_roteiro:
+            for step in g.get("roteiro_medidas", []):
+                for alloc in step["alocacoes"]:
+                    alloc["barra_global_numero"] = global_map[
+                        (step["grupo_key"], alloc["barra_numero"])
+                    ]
+
+    total_barras = sum(g["qtd_barras"] for g in grupos_sorted)
+    total_pecas_entrada = sum(g["total_pecas_entrada"] for g in grupos_sorted)
+    total_pecas_alocadas = sum(g["total_pecas_alocadas"] for g in grupos_sorted)
+    total_pecas_inviaveis = sum(g["total_pecas_inviaveis"] for g in grupos_sorted)
+    soma_pecas_mm = round(sum(g["total_metros_pecas"] * 1000.0 for g in grupos_sorted), 3)
+    total_perda_mm = round(sum(g["total_perda_mm"] for g in grupos_sorted), 3)
+    total_ajustes = sum(g["ajustes_corte"] for g in grupos_sorted)
+    total_trocas_angulo = sum(g.get("trocas_angulo", 0) for g in grupos_sorted)
+    total_econ_mm = round(sum(g.get("economia_chanfro_mm", 0.0) for g in grupos_sorted), 3)
+    total_cortes_par = sum(g.get("cortes_paralelos_qtd", 0) for g in grupos_sorted)
+    total_cortes_v = sum(g.get("cortes_v_qtd", 0) for g in grupos_sorted)
+    soma_util_mm = max(0.0, round(soma_pecas_mm - total_econ_mm, 3))
+    aproveitamento, perda_media = _calc_avg_yield_and_loss(
+        soma_util_mm, total_perda_mm, total_barras, barra_mm
+    )
+
+    resumo = {
+        "total_grupos": len(grupos_sorted),
+        "total_pecas_entrada": total_pecas_entrada,
+        "total_pecas_alocadas": total_pecas_alocadas,
+        "total_pecas_inviaveis": total_pecas_inviaveis,
+        "total_barras": total_barras,
+        "total_metros_pecas": round(soma_pecas_mm / 1000.0, 3),
+        "total_perda_mm": total_perda_mm,
+        "total_perda_metros": round(total_perda_mm / 1000.0, 3),
+        "perda_media_barra_mm": perda_media,
+        "aproveitamento_medio_pct": aproveitamento,
+        "total_ajustes_corte": total_ajustes,
+        "total_trocas_angulo": total_trocas_angulo,
+        "total_economia_chanfro_mm": total_econ_mm,
+        "total_cortes_paralelos": total_cortes_par,
+        "total_cortes_v": total_cortes_v,
+    }
+
+    payload: Dict[str, Any] = {
+        "id": scenario_id,
+        "nome": nome,
+        "descricao": descricao,
+        "resumo": resumo,
+        "grupos": grupos_sorted,
+        "barras_flat": barras_flat,
+    }
+
+    if include_roteiro:
+        roteiro_flat = []
+        for g in grupos_sorted:
+            for step in g.get("roteiro_medidas", []):
+                roteiro_flat.append(step)
+        roteiro_flat.sort(
+            key=lambda s: (-s["medida_corte_mm"], s["grupo_nome"], s["passo"])
+        )
+        payload["roteiro_flat"] = roteiro_flat
+
+    return payload
+
+
 def build_bar_optimization(
     detailed_bars: List[Dict[str, Any]],
     config: Optional[OptimizationConfig] = None,
     rules: Optional[Dict[str, CuttingRule]] = None,
 ) -> Dict[str, Any]:
-    """Otimiza cortes de barras agrupados por Código de Perfil (ou Modelo + Tipo).
-
-    Separa cada grupo e o consolidado em:
-    - Grupo 1: Barras fechadas (ex.: 6m) com perda <= `perda_maxima_mm`
-    - Grupo 2: Peças restantes ordenadas estritamente do maior para o menor,
-      além da otimização dessas peças viáveis no menor nº possível de barras de 6m.
-    """
+    """Otimiza cortes em barras de 6 m por perfil físico em 2 cenários: Material vs Tempo."""
     cfg = config or OptimizationConfig()
     L_um = max(1, _to_um(cfg.comprimento_barra_mm))
     D_um = max(0, _to_um(cfg.desponte_mm))
     K_um = max(0, _to_um(cfg.espessura_serra_mm))
-    Pmax_um = max(0, _to_um(cfg.perda_maxima_mm))
 
     usable_um = max(1, L_um - D_um)
     cap_um = usable_um + K_um
-    w_min_um = max(1, cap_um - Pmax_um)
 
-    # Agrupamento e expansão em peças unitárias
     groups_pieces: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
     group_meta: Dict[str, Dict[str, Any]] = {}
 
@@ -1057,6 +1434,39 @@ def build_bar_optimization(
         gm["acabamentos_set"].add((bar.get("acabamento_perfil") or "PADRAO").strip())
 
         c_um = _to_um(med_mm)
+        a_esq, a_dir = _resolve_bar_angles(bar)
+        ang_sig = _angle_sig(a_esq, a_dir)
+        ang_str = _format_angles(a_esq, a_dir)
+
+        eh_pux = bool(bar.get("eh_perfil_puxador"))
+        modelo_bar = (bar.get("modelo") or "OUTRO").strip()
+        rule_bar = rules.get(modelo_bar) if rules else None
+        if "perfil_simetrico" in bar and bar["perfil_simetrico"] is not None:
+            perfil_sim = bool(bar["perfil_simetrico"])
+        elif rule_bar is not None:
+            perfil_sim = bool(
+                rule_bar.perfil_simetrico_puxador if eh_pux else rule_bar.perfil_simetrico_lateral
+            )
+        else:
+            perfil_sim = False
+
+        raw_larg = bar.get("largura_perfil_mm")
+        if raw_larg is not None and float(raw_larg or 0.0) > 0.0:
+            larg_perfil_mm = round(float(raw_larg), 3)
+        elif rule_bar is not None:
+            larg_perfil_mm = round(
+                float(
+                    rule_bar.largura_perfil_puxador_mm
+                    if eh_pux
+                    else rule_bar.largura_perfil_quadro_mm
+                )
+                or 0.0,
+                3,
+            )
+        else:
+            larg_perfil_mm = 0.0
+        prof_w_um = max(0, _to_um(larg_perfil_mm))
+
         for _ in range(qtd):
             groups_pieces[g_key].append(
                 {
@@ -1073,18 +1483,25 @@ def build_bar_optimization(
                     "acabamento_perfil": str(bar.get("acabamento_perfil") or "PADRAO"),
                     "funcao_barra": str(bar.get("funcao_barra") or ""),
                     "orientacao": str(bar.get("orientacao") or ""),
-                    "eh_perfil_puxador": bool(bar.get("eh_perfil_puxador")),
+                    "eh_perfil_puxador": eh_pux,
                     "tipo_corte": str(bar.get("tipo_corte") or ""),
+                    "angulo_esq": a_esq,
+                    "angulo_dir": a_dir,
+                    "angulos_corte": ang_str,
+                    "perfil_simetrico": perfil_sim,
+                    "largura_perfil_mm": larg_perfil_mm,
                     "observacao_corte": str(bar.get("observacao_corte") or ""),
                     "medida_corte_mm": med_mm,
                     "_c_um": c_um,
                     "_w_um": c_um + K_um,
+                    "_ang_sig": ang_sig,
+                    "_prof_w_um": prof_w_um,
                 }
             )
 
-    grupos_out: List[Dict[str, Any]] = []
-    nao_alocados_flat_raw: List[Dict[str, Any]] = []
-    pecas_inviaveis_flat_raw: List[Dict[str, Any]] = []
+    grupos_material: List[Dict[str, Any]] = []
+    grupos_tempo: List[Dict[str, Any]] = []
+    pecas_inviaveis_raw: List[Dict[str, Any]] = []
 
     for g_key, pieces in groups_pieces.items():
         gm = group_meta[g_key]
@@ -1101,164 +1518,141 @@ def build_bar_optimization(
             else:
                 eligible.append(p)
 
-        # Buckets determinísticos por peso efetivo w_um (prioriza entregas mais próximas)
-        buckets: Dict[int, deque] = defaultdict(deque)
-        for p in sorted(
-            eligible, key=lambda x: (x["data_entrega"], x["op"], x["codigo"])
-        ):
-            buckets[p["_w_um"]].append(p)
-
-        weights = sorted(buckets.keys(), reverse=True)
-        counts = [len(buckets[w]) for w in weights]
-
-        # Grupo 1: barras dentro do limite de perda configurável
-        patterns_g1 = _solve_counts(weights, counts, w_min_um, cap_um)
-        barras_fechadas = _materialize_bars(
-            patterns_g1, weights, buckets, gm, cfg, L_um, D_um, K_um, grupo_otimizacao=1
+        pecas_inviaveis_raw.extend(oversized)
+        medidas_distintas = len({p["medida_corte_mm"] for p in eligible})
+        angulos_presentes = sorted(
+            {_format_angles(*p["_ang_sig"]) for p in eligible}
+        )
+        grupo_simetrico = bool(eligible) and all(
+            bool(p["perfil_simetrico"]) for p in eligible
         )
 
-        # Peças elegíveis que sobraram do Grupo 1 vão para o Grupo 2
-        g2_eligible_internal: List[Dict[str, Any]] = []
-        g2_buckets: Dict[int, deque] = defaultdict(deque)
-        for w in weights:
-            while buckets[w]:
-                p = buckets[w].popleft()
-                g2_eligible_internal.append(p)
-                g2_buckets[w].append(p)
-
-        # Lista completa do Grupo 2 (elegíveis restantes + maiores que a barra) -> Maior -> Menor
-        nao_alocados: List[Dict[str, Any]] = list(oversized)
-        motivo_g2 = (
-            f"Perda acima de {round(cfg.perda_maxima_mm / 10.0, 2):g} cm ({cfg.perda_maxima_mm:g} mm)"
+        # Cenário 1: Aproveitamento de Material
+        mat_bars, mat_adj, mat_ang_adj = _build_material_group(
+            eligible, gm, cfg, L_um, D_um, K_um, cap_um
         )
-        for p in g2_eligible_internal:
-            p_clean = {k: v for k, v in p.items() if not k.startswith("_")}
-            p_clean["motivo"] = motivo_g2
-            nao_alocados.append(p_clean)
-
-        nao_alocados.sort(
-            key=lambda x: (-x["medida_corte_mm"], x["data_entrega"], x["op"], x["codigo"])
-        )
-        nao_alocados_flat_raw.extend(nao_alocados)
-        pecas_inviaveis_flat_raw.extend(oversized)
-
-        nao_alocados_agrupados = _group_unplaced_pieces(nao_alocados)
-
-        # Otimização do Grupo 2: menor número possível de barras de 6m com peças elegíveis
-        g2_weights = sorted(g2_buckets.keys(), reverse=True)
-        g2_counts = [len(g2_buckets[w]) for w in g2_weights]
-        patterns_g2 = _pack_min_bars(g2_weights, g2_counts, cap_um)
-        barras_grupo2 = _materialize_bars(
-            patterns_g2, g2_weights, g2_buckets, gm, cfg, L_um, D_um, K_um, grupo_otimizacao=2
+        mat_soma_mm = round(sum(b["soma_pecas_mm"] for b in mat_bars), 3)
+        mat_econ_mm = round(sum(b["economia_chanfro_mm"] for b in mat_bars), 3)
+        mat_util_mm = max(0.0, round(mat_soma_mm - mat_econ_mm, 3))
+        mat_perda_mm = round(sum(b["perda_mm"] for b in mat_bars), 3)
+        mat_par_qtd = sum(b["cortes_paralelos_qtd"] for b in mat_bars)
+        mat_v_qtd = sum(b["cortes_v_qtd"] for b in mat_bars)
+        mat_aprov, mat_perda_media = _calc_avg_yield_and_loss(
+            mat_util_mm, mat_perda_mm, len(mat_bars), cfg.comprimento_barra_mm
         )
 
-        # KPIs do Grupo 1
-        total_pecas_entrada = len(pieces)
-        total_pecas_alocadas = sum(b["qtd_pecas"] for b in barras_fechadas)
-        total_pecas_nao_alocadas = len(nao_alocados)
-        soma_alocados_mm = round(sum(b["soma_pecas_mm"] for b in barras_fechadas), 3)
-        soma_nao_alocados_mm = round(
-            sum(p["medida_corte_mm"] for p in nao_alocados), 3
-        )
-        soma_perda_mm = round(sum(b["perda_mm"] for b in barras_fechadas), 3)
-        qtd_barras = len(barras_fechadas)
-        aproveitamento_medio, perda_media_g1 = _calc_avg_yield_and_loss(
-            soma_alocados_mm, soma_perda_mm, qtd_barras, cfg.comprimento_barra_mm
-        )
+        common_meta = {
+            "grupo_key": gm["grupo_key"],
+            "grupo_nome": gm["grupo_nome"],
+            "origem_agrupamento": gm["origem_agrupamento"],
+            "codigo_perfil": gm["codigo_perfil"],
+            "modelos": sorted(gm["modelos_set"]),
+            "tipos_perfil": sorted(gm["tipos_set"]),
+            "acabamentos": sorted(gm["acabamentos_set"]),
+            "angulos_presentes": angulos_presentes,
+            "perfil_simetrico": grupo_simetrico,
+            "total_pecas_entrada": len(pieces),
+            "total_pecas_alocadas": len(eligible),
+            "total_pecas_inviaveis": len(oversized),
+            "medidas_distintas": medidas_distintas,
+        }
 
-        # KPIs do Grupo 2 Otimizado
-        qtd_barras_g2 = len(barras_grupo2)
-        total_pecas_alocadas_g2 = sum(b["qtd_pecas"] for b in barras_grupo2)
-        total_pecas_inviaveis = len(oversized)
-        soma_alocados_g2_mm = round(sum(b["soma_pecas_mm"] for b in barras_grupo2), 3)
-        soma_perda_g2_mm = round(sum(b["perda_mm"] for b in barras_grupo2), 3)
-        aproveitamento_g2, perda_media_g2 = _calc_avg_yield_and_loss(
-            soma_alocados_g2_mm, soma_perda_g2_mm, qtd_barras_g2, cfg.comprimento_barra_mm
-        )
-
-        # KPIs Consolidados do Grupo (G1 + G2)
-        qtd_barras_total = qtd_barras + qtd_barras_g2
-        soma_geral_mm = round(soma_alocados_mm + soma_alocados_g2_mm, 3)
-        perda_geral_mm = round(soma_perda_mm + soma_perda_g2_mm, 3)
-        aproveitamento_geral_grp, perda_media_geral_grp = _calc_avg_yield_and_loss(
-            soma_geral_mm, perda_geral_mm, qtd_barras_total, cfg.comprimento_barra_mm
-        )
-
-        grupos_out.append(
+        grupos_material.append(
             {
-                "grupo_key": gm["grupo_key"],
-                "grupo_nome": gm["grupo_nome"],
-                "origem_agrupamento": gm["origem_agrupamento"],
-                "codigo_perfil": gm["codigo_perfil"],
-                "modelos": sorted(gm["modelos_set"]),
-                "tipos_perfil": sorted(gm["tipos_set"]),
-                "acabamentos": sorted(gm["acabamentos_set"]),
-                "qtd_barras_6m": qtd_barras,
-                "total_pecas_entrada": total_pecas_entrada,
-                "total_pecas_alocadas": total_pecas_alocadas,
-                "total_pecas_nao_alocadas": total_pecas_nao_alocadas,
-                "total_metros_entrada": round(
-                    (soma_alocados_mm + soma_nao_alocados_mm) / 1000.0, 3
-                ),
-                "total_metros_alocados": round(soma_alocados_mm / 1000.0, 3),
-                "total_metros_nao_alocados": round(soma_nao_alocados_mm / 1000.0, 3),
-                "total_perda_mm": soma_perda_mm,
-                "perda_media_barra_grupo1_mm": perda_media_g1,
-                "aproveitamento_medio_pct": aproveitamento_medio,
-                "qtd_barras_grupo2": qtd_barras_g2,
-                "total_pecas_alocadas_grupo2": total_pecas_alocadas_g2,
-                "total_pecas_inviaveis": total_pecas_inviaveis,
-                "total_metros_alocados_grupo2": round(soma_alocados_g2_mm / 1000.0, 3),
-                "total_perda_grupo2_mm": soma_perda_g2_mm,
-                "total_perda_grupo2_metros": round(soma_perda_g2_mm / 1000.0, 3),
-                "perda_media_barra_grupo2_mm": perda_media_g2,
-                "aproveitamento_medio_grupo2_pct": aproveitamento_g2,
-                "qtd_barras_total": qtd_barras_total,
-                "total_perda_geral_mm": perda_geral_mm,
-                "total_perda_geral_metros": round(perda_geral_mm / 1000.0, 3),
-                "perda_media_barra_geral_mm": perda_media_geral_grp,
-                "aproveitamento_medio_geral_pct": aproveitamento_geral_grp,
-                "barras_fechadas": barras_fechadas,
-                "barras_grupo2": barras_grupo2,
-                "nao_alocados": nao_alocados,
-                "nao_alocados_agrupados": nao_alocados_agrupados,
+                **common_meta,
+                "qtd_barras": len(mat_bars),
+                "total_metros_pecas": round(mat_soma_mm / 1000.0, 3),
+                "total_perda_mm": mat_perda_mm,
+                "total_perda_metros": round(mat_perda_mm / 1000.0, 3),
+                "perda_media_barra_mm": mat_perda_media,
+                "aproveitamento_medio_pct": mat_aprov,
+                "ajustes_corte": mat_adj,
+                "trocas_angulo": mat_ang_adj,
+                "economia_chanfro_mm": mat_econ_mm,
+                "cortes_paralelos_qtd": mat_par_qtd,
+                "cortes_v_qtd": mat_v_qtd,
+                "barras": mat_bars,
             }
         )
 
-    grupos_out.sort(
-        key=lambda g: (
-            -g["qtd_barras_6m"],
-            -g["qtd_barras_grupo2"],
-            -g["total_pecas_entrada"],
-            g["grupo_nome"],
+        # Cenário 2: Tempo de Execução (Lote por Medida FFD Maior -> Menor)
+        tmp_bars, tmp_roteiro, tmp_adj, tmp_ang_adj = _build_tempo_execucao_group(
+            eligible, gm, cfg, L_um, D_um, K_um, cap_um
         )
+        tmp_soma_mm = round(sum(b["soma_pecas_mm"] for b in tmp_bars), 3)
+        tmp_econ_mm = round(sum(b["economia_chanfro_mm"] for b in tmp_bars), 3)
+        tmp_util_mm = max(0.0, round(tmp_soma_mm - tmp_econ_mm, 3))
+        tmp_perda_mm = round(sum(b["perda_mm"] for b in tmp_bars), 3)
+        tmp_par_qtd = sum(b["cortes_paralelos_qtd"] for b in tmp_bars)
+        tmp_v_qtd = sum(b["cortes_v_qtd"] for b in tmp_bars)
+        tmp_aprov, tmp_perda_media = _calc_avg_yield_and_loss(
+            tmp_util_mm, tmp_perda_mm, len(tmp_bars), cfg.comprimento_barra_mm
+        )
+
+        grupos_tempo.append(
+            {
+                **common_meta,
+                "qtd_barras": len(tmp_bars),
+                "total_metros_pecas": round(tmp_soma_mm / 1000.0, 3),
+                "total_perda_mm": tmp_perda_mm,
+                "total_perda_metros": round(tmp_perda_mm / 1000.0, 3),
+                "perda_media_barra_mm": tmp_perda_media,
+                "aproveitamento_medio_pct": tmp_aprov,
+                "ajustes_corte": tmp_adj,
+                "trocas_angulo": tmp_ang_adj,
+                "economia_chanfro_mm": tmp_econ_mm,
+                "cortes_paralelos_qtd": tmp_par_qtd,
+                "cortes_v_qtd": tmp_v_qtd,
+                "barras": tmp_bars,
+                "roteiro_medidas": tmp_roteiro,
+            }
+        )
+
+    cenario_material = _assemble_scenario_payload(
+        "material",
+        "Aproveitamento de Material",
+        "Menor número de barras e menor perda total, com encadeamento de medidas entre barras.",
+        grupos_material,
+        cfg.comprimento_barra_mm,
+        include_roteiro=False,
+    )
+    cenario_tempo = _assemble_scenario_payload(
+        "tempo_execucao",
+        "Tempo de Execução (Maior → Menor)",
+        "Corte em lote por medida da maior para a menor reaproveitando sobras (mínimo de ajustes).",
+        grupos_tempo,
+        cfg.comprimento_barra_mm,
+        include_roteiro=True,
     )
 
-    barras_otimizadas_flat: List[Dict[str, Any]] = []
-    barras_grupo2_flat: List[Dict[str, Any]] = []
-    for g in sorted(grupos_out, key=lambda x: x["grupo_nome"]):
-        for b in g["barras_fechadas"]:
-            barras_otimizadas_flat.append(dict(b))
-        for b in g["barras_grupo2"]:
-            barras_grupo2_flat.append(dict(b))
-    for i, b in enumerate(barras_otimizadas_flat, start=1):
-        b["barra_global_numero"] = i
-    for i, b in enumerate(barras_grupo2_flat, start=1):
-        b["barra_global_numero"] = i
+    mat_r = cenario_material["resumo"]
+    tmp_r = cenario_tempo["resumo"]
+    reducao_ajustes = mat_r["total_ajustes_corte"] - tmp_r["total_ajustes_corte"]
+    reducao_pct = (
+        round((reducao_ajustes / mat_r["total_ajustes_corte"]) * 100.0, 2)
+        if mat_r["total_ajustes_corte"] > 0
+        else 0.0
+    )
 
-    nao_alocados_flat = sorted(
-        nao_alocados_flat_raw,
-        key=lambda x: (
-            -x["medida_corte_mm"],
-            x["grupo_nome"],
-            x["data_entrega"],
-            x["op"],
-            x["codigo"],
+    comparativo = {
+        "diferenca_barras_tempo_vs_material": tmp_r["total_barras"] - mat_r["total_barras"],
+        "diferenca_perda_mm_tempo_vs_material": round(
+            tmp_r["total_perda_mm"] - mat_r["total_perda_mm"], 3
         ),
-    )
-    nao_alocados_agrupados_flat = _group_unplaced_pieces(nao_alocados_flat)
+        "diferenca_perda_metros_tempo_vs_material": round(
+            tmp_r["total_perda_metros"] - mat_r["total_perda_metros"], 3
+        ),
+        "reducao_ajustes_tempo_vs_material": reducao_ajustes,
+        "reducao_ajustes_pct": reducao_pct,
+        "reducao_trocas_angulo_tempo_vs_material": mat_r["total_trocas_angulo"]
+        - tmp_r["total_trocas_angulo"],
+        "diferenca_economia_chanfro_mm_tempo_vs_material": round(
+            tmp_r["total_economia_chanfro_mm"] - mat_r["total_economia_chanfro_mm"], 3
+        ),
+    }
+
     pecas_inviaveis_flat = sorted(
-        pecas_inviaveis_flat_raw,
+        pecas_inviaveis_raw,
         key=lambda x: (
             -x["medida_corte_mm"],
             x["grupo_nome"],
@@ -1266,162 +1660,14 @@ def build_bar_optimization(
             x["op"],
             x["codigo"],
         ),
-    )
-
-    total_barras_6m = sum(g["qtd_barras_6m"] for g in grupos_out)
-    total_pecas_entrada = sum(g["total_pecas_entrada"] for g in grupos_out)
-    total_pecas_alocadas = sum(g["total_pecas_alocadas"] for g in grupos_out)
-    total_pecas_nao_alocadas = sum(g["total_pecas_nao_alocadas"] for g in grupos_out)
-    total_metros_entrada = round(
-        sum(g["total_metros_entrada"] for g in grupos_out), 3
-    )
-    total_metros_alocados = round(
-        sum(g["total_metros_alocados"] for g in grupos_out), 3
-    )
-    total_metros_nao_alocados = round(
-        sum(g["total_metros_nao_alocados"] for g in grupos_out), 3
-    )
-    total_perda_mm = round(sum(g["total_perda_mm"] for g in grupos_out), 3)
-    aproveitamento_g1, perda_media_g1_geral = _calc_avg_yield_and_loss(
-        total_metros_alocados * 1000.0,
-        total_perda_mm,
-        total_barras_6m,
-        cfg.comprimento_barra_mm,
-    )
-
-    total_barras_g2 = sum(g["qtd_barras_grupo2"] for g in grupos_out)
-    total_pecas_alocadas_g2 = sum(g["total_pecas_alocadas_grupo2"] for g in grupos_out)
-    total_pecas_inviaveis = sum(g["total_pecas_inviaveis"] for g in grupos_out)
-    total_metros_alocados_g2 = round(
-        sum(g["total_metros_alocados_grupo2"] for g in grupos_out), 3
-    )
-    total_perda_g2_mm = round(sum(g["total_perda_grupo2_mm"] for g in grupos_out), 3)
-    aproveitamento_g2_geral, perda_media_g2_geral = _calc_avg_yield_and_loss(
-        total_metros_alocados_g2 * 1000.0,
-        total_perda_g2_mm,
-        total_barras_g2,
-        cfg.comprimento_barra_mm,
-    )
-
-    total_barras_geral = total_barras_6m + total_barras_g2
-    total_perda_geral_mm = round(total_perda_mm + total_perda_g2_mm, 3)
-    aproveitamento_geral_consolidado, perda_media_geral = _calc_avg_yield_and_loss(
-        (total_metros_alocados + total_metros_alocados_g2) * 1000.0,
-        total_perda_geral_mm,
-        total_barras_geral,
-        cfg.comprimento_barra_mm,
     )
 
     return {
         "config": cfg.to_dict(),
-        "resumo": {
-            "total_grupos": len(grupos_out),
-            "grupos_com_barras_fechadas": sum(
-                1 for g in grupos_out if g["qtd_barras_6m"] > 0
-            ),
-            "total_pecas_entrada": total_pecas_entrada,
-            "total_pecas_alocadas": total_pecas_alocadas,
-            "total_pecas_nao_alocadas": total_pecas_nao_alocadas,
-            "total_barras_6m": total_barras_6m,
-            "total_metros_entrada": total_metros_entrada,
-            "total_metros_alocados": total_metros_alocados,
-            "total_metros_nao_alocados": total_metros_nao_alocados,
-            "total_perda_mm": total_perda_mm,
-            "total_perda_metros": round(total_perda_mm / 1000.0, 3),
-            "perda_media_barra_grupo1_mm": perda_media_g1_geral,
-            "aproveitamento_medio_pct": aproveitamento_g1,
-            "total_barras_grupo2": total_barras_g2,
-            "total_pecas_alocadas_grupo2": total_pecas_alocadas_g2,
-            "total_pecas_inviaveis": total_pecas_inviaveis,
-            "total_metros_alocados_grupo2": total_metros_alocados_g2,
-            "total_perda_grupo2_mm": total_perda_g2_mm,
-            "total_perda_grupo2_metros": round(total_perda_g2_mm / 1000.0, 3),
-            "perda_media_barra_grupo2_mm": perda_media_g2_geral,
-            "aproveitamento_medio_grupo2_pct": aproveitamento_g2_geral,
-            "total_barras_geral": total_barras_geral,
-            "total_perda_geral_mm": total_perda_geral_mm,
-            "total_perda_geral_metros": round(total_perda_geral_mm / 1000.0, 3),
-            "perda_media_barra_geral_mm": perda_media_geral,
-            "aproveitamento_medio_geral_pct": aproveitamento_geral_consolidado,
+        "comparativo": comparativo,
+        "cenarios": {
+            "material": cenario_material,
+            "tempo_execucao": cenario_tempo,
         },
-        "grupos": grupos_out,
-        "barras_otimizadas_flat": barras_otimizadas_flat,
-        "barras_grupo2_flat": barras_grupo2_flat,
         "pecas_inviaveis_flat": pecas_inviaveis_flat,
-        "nao_alocados_flat": nao_alocados_flat,
-        "nao_alocados_agrupados_flat": nao_alocados_agrupados_flat,
     }
-
-
-def _group_unplaced_pieces(pieces: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """Agrupa peças não alocadas mantendo ordenação estrita do maior para o menor."""
-    grouped: Dict[tuple, Dict[str, Any]] = {}
-    for p in pieces:
-        key = (
-            p["grupo_nome"],
-            p["codigo_perfil"],
-            p["modelo"],
-            p["tipo_perfil"],
-            p["acabamento_perfil"],
-            p["funcao_barra"],
-            p["tipo_corte"],
-            p["medida_corte_mm"],
-            p.get("motivo", ""),
-        )
-        if key not in grouped:
-            grouped[key] = {
-                "grupo_key": p["grupo_key"],
-                "grupo_nome": p["grupo_nome"],
-                "origem_agrupamento": p["origem_agrupamento"],
-                "codigo_perfil": p["codigo_perfil"],
-                "modelo": p["modelo"],
-                "tipo_perfil": p["tipo_perfil"],
-                "acabamento_perfil": p["acabamento_perfil"],
-                "funcao_barra": p["funcao_barra"],
-                "tipo_corte": p["tipo_corte"],
-                "medida_corte_mm": p["medida_corte_mm"],
-                "motivo": p.get("motivo", ""),
-                "qtd_pecas": 0,
-                "total_mm": 0.0,
-                "ops": set(),
-            }
-        entry = grouped[key]
-        entry["qtd_pecas"] += 1
-        entry["total_mm"] = round(entry["total_mm"] + p["medida_corte_mm"], 3)
-        if p.get("op"):
-            entry["ops"].add(p["op"])
-
-    out: List[Dict[str, Any]] = []
-    for entry in grouped.values():
-        ops_sorted = sorted(entry["ops"])
-        out.append(
-            {
-                "grupo_key": entry["grupo_key"],
-                "grupo_nome": entry["grupo_nome"],
-                "origem_agrupamento": entry["origem_agrupamento"],
-                "codigo_perfil": entry["codigo_perfil"],
-                "modelo": entry["modelo"],
-                "tipo_perfil": entry["tipo_perfil"],
-                "acabamento_perfil": entry["acabamento_perfil"],
-                "funcao_barra": entry["funcao_barra"],
-                "tipo_corte": entry["tipo_corte"],
-                "medida_corte_mm": entry["medida_corte_mm"],
-                "motivo": entry["motivo"],
-                "qtd_pecas": entry["qtd_pecas"],
-                "total_mm": entry["total_mm"],
-                "total_metros": round(entry["total_mm"] / 1000.0, 3),
-                "qtd_ops": len(ops_sorted),
-                "ops": ", ".join(ops_sorted[:10])
-                + (f" (+{len(ops_sorted) - 10})" if len(ops_sorted) > 10 else ""),
-            }
-        )
-
-    out.sort(
-        key=lambda x: (
-            -x["medida_corte_mm"],
-            x["grupo_nome"],
-            x["modelo"],
-            x["funcao_barra"],
-        )
-    )
-    return out

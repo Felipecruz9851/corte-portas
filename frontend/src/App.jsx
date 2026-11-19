@@ -20,8 +20,28 @@ const TABS = [
   { id: "tab-regras", panelId: "panel-regras", label: "Regras e Descontos (mm)", icon: SlidersHorizontal },
 ];
 
+function isHtmlFile(file) {
+  if (!file) return false;
+  const name = (file.name || "").toLowerCase();
+  return name.endsWith(".html") || name.endsWith(".htm") || file.type === "text/html";
+}
+
+async function readHtmlFileText(file) {
+  const buffer = await file.arrayBuffer();
+  try {
+    return new TextDecoder("utf-8", { fatal: true }).decode(buffer);
+  } catch {
+    return new TextDecoder("iso-8859-1").decode(buffer);
+  }
+}
+
+function getFileKey(file) {
+  return `${file.name}::${file.size}::${file.lastModified}`;
+}
+
 export default function App() {
   const [payload, setPayload] = useState(null);
+  const [loadedHtmlFiles, setLoadedHtmlFiles] = useState([]);
   const [rules, setRules] = useState({});
   const [activeTab, setActiveTab] = useState("tab-itens");
 
@@ -33,14 +53,13 @@ export default function App() {
   const [isOptimizing, setIsOptimizing] = useState(false);
   const [optimizationConfig, setOptimizationConfig] = useState({
     comprimento_barra_mm: 6000,
-    perda_maxima_mm: 200,
     espessura_serra_mm: 0,
     desponte_mm: 0,
     separar_por_acabamento: false,
   });
   const [exportingKey, setExportingKey] = useState(null);
   const [status, setStatus] = useState({
-    message: "Pronto para consultar o ERP ou carregar um arquivo HTML de OP.",
+    message: "Pronto para consultar o ERP ou carregar um ou mais arquivos HTML de OP.",
     kind: "",
   });
 
@@ -156,6 +175,7 @@ export default function App() {
         body: JSON.stringify(body),
       });
       applyPayload(data);
+      setLoadedHtmlFiles([]);
       setStatus({
         message: `Extração concluída: ${data.kpis.total_linhas_op} linhas e ${data.kpis.total_barras_corte} barras calculadas.`,
         kind: "ok",
@@ -168,21 +188,160 @@ export default function App() {
     }
   };
 
-  const handleUploadHtmlFile = async (file) => {
+  const handleUploadHtmlFiles = async (fileList, { append = false } = {}) => {
+    const incoming = Array.from(fileList || []);
+    if (incoming.length === 0) return;
+
+    const validFiles = incoming.filter(isHtmlFile);
+    const ignoredCount = incoming.length - validFiles.length;
+
+    if (validFiles.length === 0) {
+      setStatus({
+        message: "Selecione ou arraste apenas arquivos .html ou .htm válidos.",
+        kind: "err",
+      });
+      return;
+    }
+
     setIsLoading(true);
-    setStatus({ message: `Processando ${file.name}...`, kind: "" });
+    setStatus({
+      message:
+        validFiles.length === 1 && !append
+          ? `Processando ${validFiles[0].name}...`
+          : `Processando ${validFiles.length} arquivo(s) HTML...`,
+      kind: "",
+    });
+
     try {
-      const html = await file.text();
+      const parsedEntries = await Promise.all(
+        validFiles.map(async (file) => ({
+          key: getFileKey(file),
+          name: file.name,
+          html: await readHtmlFileText(file),
+        }))
+      );
+
+      const emptyNames = [];
+      const nonEmptyEntries = [];
+      for (const entry of parsedEntries) {
+        if (entry.html.trim().length < 10) {
+          emptyNames.push(entry.name);
+        } else {
+          nonEmptyEntries.push(entry);
+        }
+      }
+
+      if (nonEmptyEntries.length === 0) {
+        setStatus({
+          message: `Arquivo(s) vazio(s) ou inválido(s): ${emptyNames.join(", ")}.`,
+          kind: "err",
+        });
+        return;
+      }
+
+      const baseFiles = append ? loadedHtmlFiles : [];
+      const seenKeys = new Set(baseFiles.map((f) => f.key));
+      const nextFiles = [...baseFiles];
+      let addedCount = 0;
+      let duplicateCount = 0;
+
+      for (const entry of nonEmptyEntries) {
+        if (seenKeys.has(entry.key)) {
+          duplicateCount += 1;
+          continue;
+        }
+        seenKeys.add(entry.key);
+        nextFiles.push(entry);
+        addedCount += 1;
+      }
+
+      if (append && addedCount === 0) {
+        const extraNotes = [];
+        if (emptyNames.length > 0) extraNotes.push(`${emptyNames.length} vazio(s) ignorado(s)`);
+        if (ignoredCount > 0) extraNotes.push(`${ignoredCount} não-HTML ignorado(s)`);
+        const suffix = extraNotes.length > 0 ? ` (${extraNotes.join("; ")})` : "";
+        setStatus({
+          message: `Os arquivos selecionados já estavam carregados na sessão${suffix}.`,
+          kind: "",
+        });
+        return;
+      }
+
       const data = await fetchJson("/api/extract/html", {
         method: "POST",
-        body: JSON.stringify({ html, source_name: file.name }),
+        body: JSON.stringify({
+          files: nextFiles.map((f) => ({ html: f.html, source_name: f.name })),
+        }),
       });
+
+      setLoadedHtmlFiles(nextFiles);
       applyPayload(data);
+
+      const notes = [];
+      if (ignoredCount > 0) notes.push(`${ignoredCount} não-HTML ignorado(s)`);
+      if (emptyNames.length > 0) notes.push(`${emptyNames.length} vazio(s) ignorado(s)`);
+      if (duplicateCount > 0) notes.push(`${duplicateCount} duplicado(s) ignorado(s)`);
+      const suffix = notes.length > 0 ? ` (${notes.join("; ")})` : "";
+
+      const summaryPrefix =
+        nextFiles.length === 1
+          ? `Arquivo ${nextFiles[0].name} processado`
+          : `${nextFiles.length} arquivos HTML processados`;
+
       setStatus({
-        message: `Arquivo ${file.name} processado: ${data.kpis.total_linhas_op} linhas e ${data.kpis.total_barras_corte} barras.`,
+        message: `${summaryPrefix}: ${data.kpis.total_linhas_op} linhas e ${data.kpis.total_barras_corte} barras${suffix}.`,
         kind: "ok",
       });
       setIsMobileSidebarOpen(false);
+    } catch (err) {
+      setStatus({ message: err.message, kind: "err" });
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  const handleClearHtmlFiles = async () => {
+    setIsLoading(true);
+    try {
+      await fetchJson("/api/session/clear", { method: "POST" });
+    } catch {
+      // Garante limpeza da interface mesmo em caso de erro transitório
+    } finally {
+      setLoadedHtmlFiles([]);
+      setPayload(null);
+      setStatus({
+        message: "Arquivos HTML removidos. Pronto para nova consulta ou upload.",
+        kind: "",
+      });
+      setIsLoading(false);
+    }
+  };
+
+  const handleRemoveHtmlFile = async (fileKey) => {
+    const remaining = loadedHtmlFiles.filter((f) => f.key !== fileKey);
+    if (remaining.length === 0) {
+      await handleClearHtmlFiles();
+      return;
+    }
+
+    setIsLoading(true);
+    setStatus({
+      message: `Recalculando lote (${remaining.length} arquivo(s))...`,
+      kind: "",
+    });
+    try {
+      const data = await fetchJson("/api/extract/html", {
+        method: "POST",
+        body: JSON.stringify({
+          files: remaining.map((f) => ({ html: f.html, source_name: f.name })),
+        }),
+      });
+      setLoadedHtmlFiles(remaining);
+      applyPayload(data);
+      setStatus({
+        message: `Arquivo removido. ${remaining.length} arquivo(s) ativo(s): ${data.kpis.total_linhas_op} linhas e ${data.kpis.total_barras_corte} barras.`,
+        kind: "ok",
+      });
     } catch (err) {
       setStatus({ message: err.message, kind: "err" });
     } finally {
@@ -245,9 +404,10 @@ export default function App() {
         setOptimizationConfig(result.config);
       }
       setPayload((prev) => (prev ? { ...prev, otimizacao_barras: result } : prev));
-      const r = result?.resumo || {};
+      const matR = result?.cenarios?.material?.resumo || {};
+      const tmpR = result?.cenarios?.tempo_execucao?.resumo || {};
       setStatus({
-        message: `Otimização concluída: G1 ${r.total_barras_6m ?? 0} barra(s), G2 ${r.total_barras_grupo2 ?? 0} barra(s) · Aproveit. médio ${r.aproveitamento_medio_geral_pct ?? 0}%/barra · Perda total ${r.total_perda_geral_mm ?? 0} mm.`,
+        message: `Otimização concluída: Material ${matR.total_barras ?? 0} barra(s) (${matR.aproveitamento_medio_pct ?? 0}% · ${matR.total_ajustes_corte ?? 0} ajustes) | Tempo ${tmpR.total_barras ?? 0} barra(s) (${tmpR.total_ajustes_corte ?? 0} ajustes).`,
         kind: "ok",
       });
     } catch (err) {
@@ -282,7 +442,10 @@ export default function App() {
         erpForm={erpForm}
         onChangeErpForm={setErpForm}
         onSubmitErp={handleErpSubmit}
-        onUploadHtmlFile={handleUploadHtmlFile}
+        loadedHtmlFiles={loadedHtmlFiles}
+        onUploadHtmlFiles={handleUploadHtmlFiles}
+        onRemoveHtmlFile={handleRemoveHtmlFile}
+        onClearHtmlFiles={handleClearHtmlFiles}
         isLoading={isLoading}
         status={status}
         meta={payload?.meta}

@@ -13,6 +13,32 @@ from app.description_parser import ExtractedItem
 RULES_FILE = Path(__file__).parent / "data" / "regras_corte.json"
 
 
+def _norm_angle(val: Any, fallback: int = 45) -> int:
+    """Normaliza ângulo de corte por ponta para 45° ou 90°."""
+    try:
+        if val is not None and str(val).strip() != "":
+            num = int(round(float(val)))
+            if num in (45, 90):
+                return num
+    except (TypeError, ValueError):
+        pass
+    return 90 if fallback == 90 else 45
+
+
+def default_angles_for_tipo_corte(tipo_corte: str) -> tuple[int, int, int]:
+    """Deriva (quadro, puxador, divisoria) padrão a partir de tipo_corte."""
+    tc = str(tipo_corte or "")
+    quadro_def = 90 if ("90" in tc and "45" not in tc) else 45
+    pux_def = 90 if "90" in tc else quadro_def
+    div_def = 90
+    return quadro_def, pux_def, div_def
+
+
+def format_cut_angles(ang_esq: int, ang_dir: int) -> str:
+    """Formata par de ângulos nas pontas da barra (ex.: '45° / 90°')."""
+    return f"{_norm_angle(ang_esq)}° / {_norm_angle(ang_dir)}°"
+
+
 @dataclass
 class CuttingRule:
     modelo: str
@@ -28,6 +54,11 @@ class CuttingRule:
     desconto_adjacente_puxador_mm: float = 0.0
     desconto_vidro_lateral_mm: float = 0.0
     desconto_vidro_puxador_mm: float = 0.0
+    angulo_corte_quadro: int = 45
+    angulo_corte_puxador: int = 45
+    angulo_corte_divisoria: int = 90
+    perfil_simetrico_lateral: bool = False
+    perfil_simetrico_puxador: bool = False
     observacao: str = ""
 
     def to_dict(self) -> Dict[str, Any]:
@@ -91,15 +122,24 @@ class CutBar:
     tipo_corte: str
     observacao_corte: str = ""
     tipo_perfil: str = "Lateral"
+    angulo_esq: int = 45
+    angulo_dir: int = 45
+    perfil_simetrico: bool = False
+    largura_perfil_mm: float = 0.0
 
     @property
     def total_mm(self) -> float:
         return round(self.qtd_barras * self.medida_corte_mm, 3)
 
+    @property
+    def angulos_corte(self) -> str:
+        return format_cut_angles(self.angulo_esq, self.angulo_dir)
+
     def to_dict(self) -> Dict[str, Any]:
         data = asdict(self)
         data["total_mm"] = self.total_mm
         data["total_metros"] = round(self.total_mm / 1000.0, 3)
+        data["angulos_corte"] = self.angulos_corte
         return data
 
 
@@ -107,7 +147,26 @@ def load_rules(path: Path = RULES_FILE) -> Dict[str, CuttingRule]:
     raw = json.loads(path.read_text(encoding="utf-8"))
     rules: Dict[str, CuttingRule] = {}
     for key, val in raw.items():
-        rules[key] = CuttingRule(**val)
+        data = dict(val)
+        q_def, p_def, d_def = default_angles_for_tipo_corte(
+            str(data.get("tipo_corte", ""))
+        )
+        data["angulo_corte_quadro"] = _norm_angle(
+            data.get("angulo_corte_quadro"), q_def
+        )
+        data["angulo_corte_puxador"] = _norm_angle(
+            data.get("angulo_corte_puxador"), p_def
+        )
+        data["angulo_corte_divisoria"] = _norm_angle(
+            data.get("angulo_corte_divisoria"), d_def
+        )
+        data["perfil_simetrico_lateral"] = bool(
+            data.get("perfil_simetrico_lateral", False)
+        )
+        data["perfil_simetrico_puxador"] = bool(
+            data.get("perfil_simetrico_puxador", False)
+        )
+        rules[key] = CuttingRule(**data)
     return rules
 
 
@@ -136,6 +195,11 @@ def compute_item_cuts(
     op_qty = _qty_int(item)
     bars: List[CutBar] = []
 
+    q_def, p_def, d_def = default_angles_for_tipo_corte(rule.tipo_corte)
+    aq = _norm_angle(getattr(rule, "angulo_corte_quadro", None), q_def)
+    ap = _norm_angle(getattr(rule, "angulo_corte_puxador", None), aq if getattr(rule, "angulo_corte_puxador", None) is None and p_def == q_def else p_def)
+    ad = _norm_angle(getattr(rule, "angulo_corte_divisoria", None), d_def)
+
     def add_bar(
         funcao: str,
         orientacao: str,
@@ -144,6 +208,8 @@ def compute_item_cuts(
         nominal: float,
         desconto: float,
         obs: str = "",
+        angulo_esq: int = 45,
+        angulo_dir: int = 45,
     ) -> None:
         if qtd <= 0 or nominal <= 0:
             return
@@ -151,6 +217,18 @@ def compute_item_cuts(
         codigo_perfil_regra = (
             rule.codigo_perfil_puxador if eh_puxador else rule.codigo_perfil_lateral
         ).strip()
+        eh_simetrico = bool(
+            rule.perfil_simetrico_puxador if eh_puxador else rule.perfil_simetrico_lateral
+        )
+        larg_perfil = round(
+            float(
+                rule.largura_perfil_puxador_mm
+                if eh_puxador
+                else rule.largura_perfil_quadro_mm
+            )
+            or 0.0,
+            3,
+        )
         bars.append(
             CutBar(
                 op=item.op,
@@ -171,6 +249,10 @@ def compute_item_cuts(
                 tipo_corte=rule.tipo_corte,
                 observacao_corte=obs,
                 tipo_perfil=tipo_perfil,
+                angulo_esq=_norm_angle(angulo_esq, 45),
+                angulo_dir=_norm_angle(angulo_dir, 45),
+                perfil_simetrico=eh_simetrico,
+                largura_perfil_mm=larg_perfil,
             )
         )
 
@@ -185,6 +267,8 @@ def compute_item_cuts(
             nominal=med,
             desconto=0.0,
             obs="Corte avulso conforme descrição",
+            angulo_esq=90,
+            angulo_dir=90,
         )
         return bars
 
@@ -199,6 +283,8 @@ def compute_item_cuts(
             qtd=2 * op_qty,
             nominal=med_h,
             desconto=rule.desconto_horizontal_mm,
+            angulo_esq=aq,
+            angulo_dir=aq,
         )
         add_bar(
             funcao="Vertical Quadro (Mini Kendo + Baguete)",
@@ -207,6 +293,8 @@ def compute_item_cuts(
             qtd=2 * op_qty,
             nominal=med_v,
             desconto=rule.desconto_vertical_mm,
+            angulo_esq=aq,
+            angulo_dir=aq,
         )
         return bars
 
@@ -224,6 +312,8 @@ def compute_item_cuts(
             nominal=altura,
             desconto=rule.desconto_vertical_mm,
             obs=f"{item.qtd_estruturas} escada(s) x {op_qty} OP",
+            angulo_esq=aq,
+            angulo_dir=aq,
         )
         qtd_horiz_quadro = 1 if item.eh_formato_u else 2
         add_bar(
@@ -237,6 +327,8 @@ def compute_item_cuts(
             qtd=qtd_horiz_quadro * fator,
             nominal=largura,
             desconto=rule.desconto_horizontal_mm,
+            angulo_esq=aq,
+            angulo_dir=aq,
         )
         if item.qtd_divisorias > 0:
             pos_str = ", ".join(f"{d:g}mm" for d in item.divisorias_mm)
@@ -248,6 +340,8 @@ def compute_item_cuts(
                 nominal=largura,
                 desconto=rule.desconto_divisoria_mm,
                 obs=f"Posições: {pos_str}" if pos_str else "",
+                angulo_esq=ad,
+                angulo_dir=ad,
             )
         return bars
 
@@ -267,6 +361,8 @@ def compute_item_cuts(
             qtd=2 * fator,
             nominal=altura,
             desconto=rule.desconto_vertical_mm,
+            angulo_esq=aq,
+            angulo_dir=aq,
         )
         add_bar(
             funcao="Horizontal Quadro",
@@ -275,6 +371,8 @@ def compute_item_cuts(
             qtd=2 * fator,
             nominal=largura,
             desconto=rule.desconto_horizontal_mm,
+            angulo_esq=aq,
+            angulo_dir=aq,
         )
     elif item.qtd_puxadores == 2:
         add_bar(
@@ -285,6 +383,8 @@ def compute_item_cuts(
             nominal=altura,
             desconto=rule.desconto_vertical_mm,
             obs=item.tipo_puxador,
+            angulo_esq=ap,
+            angulo_dir=ap,
         )
         horiz_desc = rule.desconto_horizontal_mm + (2.0 * adj_desc)
         div_adj_desc = 2.0 * adj_desc
@@ -296,6 +396,8 @@ def compute_item_cuts(
             nominal=largura,
             desconto=horiz_desc,
             obs=f"-{2 * adj_desc:g}mm Adj. 2 Puxadores" if adj_desc > 0 else "",
+            angulo_esq=ap,
+            angulo_dir=ap,
         )
     elif item.posicao_puxador in ("SUPERIOR", "HORIZONTAL (BASCULA/GAVETA)"):
         add_bar(
@@ -306,6 +408,8 @@ def compute_item_cuts(
             nominal=largura,
             desconto=rule.desconto_horizontal_mm,
             obs=item.tipo_puxador,
+            angulo_esq=ap,
+            angulo_dir=ap,
         )
         add_bar(
             funcao="Horizontal Quadro",
@@ -314,6 +418,8 @@ def compute_item_cuts(
             qtd=1 * fator,
             nominal=largura,
             desconto=rule.desconto_horizontal_mm,
+            angulo_esq=aq,
+            angulo_dir=aq,
         )
         vert_desc = rule.desconto_vertical_mm + adj_desc
         add_bar(
@@ -324,6 +430,8 @@ def compute_item_cuts(
             nominal=altura,
             desconto=vert_desc,
             obs=f"-{adj_desc:g}mm Adj. Puxador Sup." if adj_desc > 0 else "",
+            angulo_esq=aq,
+            angulo_dir=ap,
         )
     else:
         # 1 puxador lateral (DIREITA ou ESQUERDA)
@@ -335,6 +443,8 @@ def compute_item_cuts(
             nominal=altura,
             desconto=rule.desconto_vertical_mm,
             obs=item.tipo_puxador,
+            angulo_esq=ap,
+            angulo_dir=ap,
         )
         add_bar(
             funcao="Vertical Quadro",
@@ -343,6 +453,8 @@ def compute_item_cuts(
             qtd=1 * fator,
             nominal=altura,
             desconto=rule.desconto_vertical_mm,
+            angulo_esq=aq,
+            angulo_dir=aq,
         )
         horiz_desc = rule.desconto_horizontal_mm + adj_desc
         div_adj_desc = adj_desc
@@ -354,6 +466,8 @@ def compute_item_cuts(
             nominal=largura,
             desconto=horiz_desc,
             obs=f"-{adj_desc:g}mm Adj. Puxador Lat." if adj_desc > 0 else "",
+            angulo_esq=aq,
+            angulo_dir=ap,
         )
 
     if item.qtd_divisorias > 0:
@@ -369,6 +483,8 @@ def compute_item_cuts(
             nominal=largura,
             desconto=div_total_desc,
             obs=_join_obs(pos_note, adj_note),
+            angulo_esq=ad,
+            angulo_dir=ad,
         )
 
     return bars
@@ -394,6 +510,9 @@ def build_cutting_plan(
             bar.eh_perfil_puxador,
             bar.medida_corte_mm,
             bar.tipo_corte,
+            bar.angulo_esq,
+            bar.angulo_dir,
+            bar.perfil_simetrico,
         )
         if key not in grouped:
             grouped[key] = {
@@ -406,6 +525,10 @@ def build_cutting_plan(
                 "eh_perfil_puxador": bar.eh_perfil_puxador,
                 "medida_corte_mm": bar.medida_corte_mm,
                 "tipo_corte": bar.tipo_corte,
+                "angulo_esq": bar.angulo_esq,
+                "angulo_dir": bar.angulo_dir,
+                "angulos_corte": bar.angulos_corte,
+                "perfil_simetrico": bar.perfil_simetrico,
                 "qtd_barras": 0,
                 "total_mm": 0.0,
                 "ops": set(),
@@ -429,6 +552,10 @@ def build_cutting_plan(
                 "eh_perfil_puxador": entry["eh_perfil_puxador"],
                 "medida_corte_mm": entry["medida_corte_mm"],
                 "tipo_corte": entry["tipo_corte"],
+                "angulo_esq": entry["angulo_esq"],
+                "angulo_dir": entry["angulo_dir"],
+                "angulos_corte": entry["angulos_corte"],
+                "perfil_simetrico": entry["perfil_simetrico"],
                 "qtd_barras": entry["qtd_barras"],
                 "total_mm": entry["total_mm"],
                 "total_metros": round(entry["total_mm"] / 1000.0, 3),

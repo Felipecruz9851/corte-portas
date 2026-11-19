@@ -63,7 +63,7 @@ video {
   button,
   select,
   textarea,
-  input:not([type="checkbox"], [type="radio"]),
+  input:not([type="checkbox"], [type="radio"], .visually-hidden),
   [role="button"],
   nav a,
   label:has(input[type="checkbox"], input[type="radio"])
@@ -415,4 +415,16 @@ dialog.lider-dialog::backdrop {
     transparent 4px,
     transparent 8px
   );
+}
+
+/* Preserva extensão de arquivo (.html) visível em truncamento de linha única */
+.file-name-truncate {
+  display: flex;
+  min-inline-size: 0;
+  white-space: nowrap;
+}
+
+.file-name-truncate > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
 }

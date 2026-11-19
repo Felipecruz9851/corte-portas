@@ -1,4 +1,4 @@
-"""Testes automatizados do otimizador de corte em barras de 6m e integração API/exportação."""
+"""Testes automatizados do otimizador de barras de 6 m (Material vs Tempo de Execução)."""
 
 from __future__ import annotations
 
@@ -25,7 +25,7 @@ from app.cutting_engine import (
     load_rules,
 )
 from app.description_parser import parse_description
-from app.html_parser import RawOpRow, parse_op_html
+from app.html_parser import parse_op_html
 from main import STORE, app
 
 SAMPLE_06_11 = Path(
@@ -49,6 +49,11 @@ def _make_bar(
     op: str = "1001",
     codigo: str = "2PTAG01",
     data_entrega: str = "25/11/2026",
+    tipo_corte: str = "45°",
+    angulo_esq: int = 45,
+    angulo_dir: int = 45,
+    perfil_simetrico: bool = False,
+    largura_perfil_mm: float = 0.0,
 ) -> dict:
     tp = tipo_perfil or ("Puxador" if eh_puxador else "Lateral")
     return {
@@ -68,14 +73,19 @@ def _make_bar(
         "medida_nominal_mm": medida_mm,
         "desconto_mm": 0.0,
         "medida_corte_mm": medida_mm,
-        "tipo_corte": "45°",
+        "tipo_corte": tipo_corte,
+        "angulo_esq": angulo_esq,
+        "angulo_dir": angulo_dir,
+        "angulos_corte": f"{angulo_esq}° / {angulo_dir}°",
+        "perfil_simetrico": perfil_simetrico,
+        "largura_perfil_mm": largura_perfil_mm,
         "observacao_corte": "",
         "total_mm": round(medida_mm * qtd, 3),
         "total_metros": round((medida_mm * qtd) / 1000.0, 3),
     }
 
 
-def _assert_piece_conservation(
+def _assert_scenarios_conservation(
     tc: unittest.TestCase, detailed_bars: list[dict], result: dict
 ) -> None:
     expected = Counter()
@@ -85,50 +95,32 @@ def _assert_piece_conservation(
         if med > 0 and qtd > 0:
             expected[med] += qtd
 
-    actual = Counter()
-    for bar in result["barras_otimizadas_flat"]:
-        for p in bar["pecas"]:
-            actual[round(float(p["medida_corte_mm"]), 3)] += 1
-    for p in result["nao_alocados_flat"]:
-        actual[round(float(p["medida_corte_mm"]), 3)] += 1
-
-    tc.assertEqual(actual, expected)
-    tc.assertEqual(
-        result["resumo"]["total_pecas_entrada"],
-        result["resumo"]["total_pecas_alocadas"]
-        + result["resumo"]["total_pecas_nao_alocadas"],
+    inviaveis_cnt = Counter(
+        round(float(p["medida_corte_mm"]), 3) for p in result["pecas_inviaveis_flat"]
     )
 
-    # Verifica conservação e consistência matemática do Grupo 2 otimizado + KPIs
-    g2_expected = Counter(
-        round(float(p["medida_corte_mm"]), 3) for p in result["nao_alocados_flat"]
-    )
-    g2_actual = Counter()
-    for bar in result["barras_grupo2_flat"]:
-        tc.assertLessEqual(
-            bar["consumido_mm"], bar["comprimento_barra_mm"] + 1e-6
+    for scen_id in ("material", "tempo_execucao"):
+        scen = result["cenarios"][scen_id]
+        actual = Counter(inviaveis_cnt)
+        for bar in scen["barras_flat"]:
+            tc.assertLessEqual(bar["consumido_mm"], bar["comprimento_barra_mm"] + 1e-6)
+            for p in bar["pecas"]:
+                actual[round(float(p["medida_corte_mm"]), 3)] += 1
+
+        tc.assertEqual(actual, expected, f"Falha de conservação em {scen_id}")
+        r = scen["resumo"]
+        tc.assertEqual(
+            r["total_pecas_entrada"],
+            r["total_pecas_alocadas"] + r["total_pecas_inviaveis"],
         )
-        meds = [p["medida_corte_mm"] for p in bar["pecas"]]
-        tc.assertEqual(meds, sorted(meds, reverse=True))
-        for p in bar["pecas"]:
-            g2_actual[round(float(p["medida_corte_mm"]), 3)] += 1
-    for p in result["pecas_inviaveis_flat"]:
-        g2_actual[round(float(p["medida_corte_mm"]), 3)] += 1
 
-    tc.assertEqual(g2_actual, g2_expected)
-    r = result["resumo"]
-    tc.assertEqual(
-        r["total_pecas_alocadas_grupo2"] + r["total_pecas_inviaveis"],
-        r["total_pecas_nao_alocadas"],
-    )
-    tc.assertEqual(
-        r["total_barras_geral"], r["total_barras_6m"] + r["total_barras_grupo2"]
-    )
-    tc.assertAlmostEqual(
-        r["total_perda_geral_mm"],
-        round(r["total_perda_mm"] + r["total_perda_grupo2_mm"], 3),
-        places=2,
-    )
+    # Verifica conservação também no roteiro_flat do cenário tempo_execucao
+    roteiro_cnt = Counter(inviaveis_cnt)
+    for step in result["cenarios"]["tempo_execucao"]["roteiro_flat"]:
+        med = round(float(step["medida_corte_mm"]), 3)
+        for alloc in step["alocacoes"]:
+            roteiro_cnt[med] += alloc["qtd_cortes"]
+    tc.assertEqual(roteiro_cnt, expected, "Falha de conservação no roteiro_flat")
 
 
 class TestBarOptimizer(unittest.TestCase):
@@ -136,172 +128,147 @@ class TestBarOptimizer(unittest.TestCase):
         self.rules = load_rules()
         self.client = TestClient(app)
 
-    def test_tricky_ffd_trap_and_greedy_trap(self) -> None:
-        cfg = OptimizationConfig(comprimento_barra_mm=6000.0, perda_maxima_mm=200.0)
+    def test_material_global_vs_old_split_and_exact_packing(self) -> None:
+        cfg = OptimizationConfig(comprimento_barra_mm=6000.0)
 
-        # Caso onde FFD falha (agrupa 2500+2400 e deixa 2100+2000+1500+1400 sem fechar)
-        ffd_bars = [_make_bar(m) for m in (2500, 2400, 2100, 2000, 1500, 1400)]
-        res_ffd = build_bar_optimization(ffd_bars, cfg, self.rules)
-        _assert_piece_conservation(self, ffd_bars, res_ffd)
-        self.assertEqual(res_ffd["resumo"]["total_barras_6m"], 2)
-        self.assertEqual(res_ffd["resumo"]["total_pecas_nao_alocadas"], 0)
+        # Caso que caía em 3 barras no antigo split G1+G2, mas fecha exatamente em 2 barras
+        split_trap = [_make_bar(m) for m in (2900, 2900, 2500, 2500, 600, 600)]
+        res_split = build_bar_optimization(split_trap, cfg, self.rules)
+        _assert_scenarios_conservation(self, split_trap, res_split)
+        mat_r = res_split["cenarios"]["material"]["resumo"]
+        self.assertEqual(mat_r["total_barras"], 2)
+        self.assertEqual(mat_r["total_perda_mm"], 0.0)
+        self.assertEqual(mat_r["aproveitamento_medio_pct"], 100.0)
 
-        # Caso onde guloso de menor perda (3600+2400=6000) deixa 2300+2300+1100=5700 < 5800
-        greedy_bars = [_make_bar(m) for m in (3600, 2400, 2300, 2300, 1100)]
-        res_greedy = build_bar_optimization(greedy_bars, cfg, self.rules)
-        _assert_piece_conservation(self, greedy_bars, res_greedy)
-        self.assertEqual(res_greedy["resumo"]["total_barras_6m"], 2)
-        self.assertEqual(res_greedy["resumo"]["total_pecas_nao_alocadas"], 0)
+        # Caso onde FFD falha (precisa de redução/exact fill para fechar em 2 barras)
+        ffd_trap = [_make_bar(m) for m in (2500, 2400, 2100, 2000, 1500, 1400)]
+        res_ffd = build_bar_optimization(ffd_trap, cfg, self.rules)
+        _assert_scenarios_conservation(self, ffd_trap, res_ffd)
+        self.assertEqual(res_ffd["cenarios"]["material"]["resumo"]["total_barras"], 2)
+        self.assertEqual(res_ffd["cenarios"]["material"]["resumo"]["total_perda_mm"], 100.0)
 
-    def test_grouping_by_codigo_perfil_and_fallback_modelo_tipo(self) -> None:
+        # Caso de redução 3-para-2 ([2500, 2400, 1900, 1800, 1400, 1300])
+        red_3_2 = [_make_bar(m) for m in (2500, 2400, 1900, 1800, 1400, 1300)]
+        res_3_2 = build_bar_optimization(red_3_2, cfg, self.rules)
+        _assert_scenarios_conservation(self, red_3_2, res_3_2)
+        r32 = res_3_2["cenarios"]["material"]["resumo"]
+        self.assertEqual(r32["total_barras"], 2)
+        self.assertAlmostEqual(r32["total_perda_mm"], 700.0, places=3)
+        self.assertAlmostEqual(r32["aproveitamento_medio_pct"], 94.17, places=2)
+
+    def test_material_chaining_reduces_adjustments_and_zero_for_uniform(self) -> None:
+        # 2 barras com [2489, 2489, 956]: barra 1 termina em 956 e barra 2 inicia em 956 -> 2 trocas
+        bars = [
+            _make_bar(2489.0, op="1", qtd=4),
+            _make_bar(956.0, op="2", qtd=2),
+        ]
+        res = build_bar_optimization(bars, OptimizationConfig(), self.rules)
+        _assert_scenarios_conservation(self, bars, res)
+        mat = res["cenarios"]["material"]
+        self.assertEqual(mat["resumo"]["total_barras"], 2)
+        self.assertEqual(mat["resumo"]["total_ajustes_corte"], 2)
+        b1, b2 = mat["barras_flat"]
+        self.assertFalse(b1["troca_entrada"])
+        self.assertFalse(b2["troca_entrada"])
+        self.assertEqual(b1["pecas"][-1]["medida_corte_mm"], b2["pecas"][0]["medida_corte_mm"])
+
+        # Peças idênticas -> 0 trocas de medida em ambos os cenários
+        uniform = [_make_bar(936.0, qtd=10)]
+        res_u = build_bar_optimization(uniform, OptimizationConfig(), self.rules)
+        self.assertEqual(res_u["cenarios"]["material"]["resumo"]["total_ajustes_corte"], 0)
+        self.assertEqual(res_u["cenarios"]["tempo_execucao"]["resumo"]["total_ajustes_corte"], 0)
+
+    def test_tempo_execucao_ffd_route_and_min_adjustments(self) -> None:
+        bars = [
+            _make_bar(700.0, op="4", qtd=2),
+            _make_bar(2800.0, op="1", qtd=2),
+            _make_bar(1500.0, op="3", qtd=2),
+            _make_bar(2400.0, op="2", qtd=1),
+        ]
+        res = build_bar_optimization(bars, OptimizationConfig(), self.rules)
+        _assert_scenarios_conservation(self, bars, res)
+
+        tmp = res["cenarios"]["tempo_execucao"]
+        grp = tmp["grupos"][0]
+        roteiro = grp["roteiro_medidas"]
+
+        # Passos estritamente ordenados da maior medida para a menor
+        meds = [s["medida_corte_mm"] for s in roteiro]
+        self.assertEqual(meds, [2800.0, 2400.0, 1500.0, 700.0])
+        self.assertEqual(grp["ajustes_corte"], 3)  # 4 medidas distintas - 1
+
+        # Passo 1 (2800 x2 = 5600) abre Barra nova #1
+        self.assertFalse(roteiro[0]["troca_medida"])
+        self.assertEqual(roteiro[0]["alocacoes"][0]["origem_barra"], "Barra nova")
+        self.assertFalse(roteiro[0]["alocacoes"][0]["eh_sobra"])
+        # Passo 2 (2400) abre Barra nova #2
+        self.assertTrue(roteiro[1]["troca_medida"])
+        # Passo 3 (1500 x2 = 3000) cabe na Sobra da Barra #2 (sobra era 3600 -> fica 600)
+        alloc_1500 = roteiro[2]["alocacoes"][0]
+        self.assertTrue(alloc_1500["eh_sobra"])
+        self.assertEqual(alloc_1500["origem_barra"], "Sobra da Barra #2")
+        self.assertEqual(alloc_1500["sobra_antes_mm"], 3600.0)
+        self.assertEqual(alloc_1500["sobra_depois_mm"], 600.0)
+
+    def test_grouping_codigo_perfil_fallback_and_params(self) -> None:
         custom_rules = {k: CuttingRule(**deepcopy(v.to_dict())) for k, v in self.rules.items()}
-        # Cadastra código 5307 apenas para Lateral de CATCH e DJEI; Puxador fica sem código
         custom_rules["CATCH"].codigo_perfil_lateral = "5307"
         custom_rules["DJEI"].codigo_perfil_lateral = "5307"
         custom_rules["CATCH"].codigo_perfil_puxador = ""
         custom_rules["DJEI"].codigo_perfil_puxador = ""
 
-        # CATCH Lateral (3000) + DJEI Lateral (2950) devem se unir no grupo 5307 (5950 <= 6000)
         bars = [
-            _make_bar(3000.0, modelo="CATCH", eh_puxador=False, codigo_perfil=""),
-            _make_bar(2950.0, modelo="DJEI", eh_puxador=False, codigo_perfil=""),
-            _make_bar(1200.0, modelo="CATCH", eh_puxador=True, codigo_perfil=""),
-            _make_bar(900.0, modelo="DJEI", eh_puxador=True, codigo_perfil=""),
+            _make_bar(3000.0, modelo="CATCH", eh_puxador=False),
+            _make_bar(2950.0, modelo="DJEI", eh_puxador=False),
+            _make_bar(1200.0, modelo="CATCH", eh_puxador=True),
+            _make_bar(6150.0, modelo="RISK", eh_puxador=False),  # > 6000mm
         ]
-        res = build_bar_optimization(bars, OptimizationConfig(), custom_rules)
-        _assert_piece_conservation(self, bars, res)
 
-        by_name = {g["grupo_nome"]: g for g in res["grupos"]}
+        res = build_bar_optimization(bars, OptimizationConfig(), custom_rules)
+        _assert_scenarios_conservation(self, bars, res)
+
+        by_name = {g["grupo_nome"]: g for g in res["cenarios"]["material"]["grupos"]}
         self.assertIn("5307", by_name)
         self.assertEqual(by_name["5307"]["origem_agrupamento"], "codigo_perfil")
-        self.assertEqual(by_name["5307"]["qtd_barras_6m"], 1)
-        self.assertEqual(by_name["5307"]["total_pecas_alocadas"], 2)
-        self.assertEqual(sorted(by_name["5307"]["modelos"]), ["CATCH", "DJEI"])
-
-        # Fallback para Modelo + Tipo quando não há código cadastrado
+        self.assertEqual(by_name["5307"]["qtd_barras"], 1)
         self.assertIn("CATCH — Puxador", by_name)
         self.assertEqual(by_name["CATCH — Puxador"]["origem_agrupamento"], "modelo_tipo")
-        self.assertIn("DJEI — Puxador", by_name)
-        self.assertEqual(by_name["DJEI — Puxador"]["origem_agrupamento"], "modelo_tipo")
+        self.assertEqual(len(res["pecas_inviaveis_flat"]), 1)
+        self.assertEqual(res["pecas_inviaveis_flat"][0]["medida_corte_mm"], 6150.0)
 
-    def test_descending_ordering_and_configurable_parameters(self) -> None:
-        bars = [
-            _make_bar(400.0, modelo="RISK", eh_puxador=False, op="1"),
-            _make_bar(1850.0, modelo="RISK", eh_puxador=False, op="2"),
-            _make_bar(950.0, modelo="RISK", eh_puxador=False, op="3"),
-            _make_bar(3000.0, modelo="CATCH", eh_puxador=False, op="4", qtd=2),
-            _make_bar(6200.0, modelo="ALLU", eh_puxador=False, op="5"),  # > 6000mm
-            _make_bar(833.333, modelo="RISK", eh_puxador=False, op="6"),
-        ]
-
-        # 1) Kerf = 0 -> duas de 3000 fecham uma barra de 6m com perda 0
-        res_no_kerf = build_bar_optimization(
-            bars,
-            OptimizationConfig(
-                comprimento_barra_mm=6000.0,
-                perda_maxima_mm=200.0,
-                espessura_serra_mm=0.0,
-            ),
-            self.rules,
-        )
-        _assert_piece_conservation(self, bars, res_no_kerf)
-        catch_grp = next(g for g in res_no_kerf["grupos"] if g["grupo_nome"] == "CATCH — Lateral")
-        self.assertEqual(catch_grp["qtd_barras_6m"], 1)
-        self.assertEqual(catch_grp["barras_fechadas"][0]["perda_mm"], 0.0)
-
-        # Verifica ordenação estrita maior -> menor no Grupo 2 (global e por grupo)
-        flat_meds = [p["medida_corte_mm"] for p in res_no_kerf["nao_alocados_flat"]]
-        self.assertEqual(flat_meds, sorted(flat_meds, reverse=True))
-        grp_meds = [
-            p["medida_corte_mm"] for p in res_no_kerf["nao_alocados_agrupados_flat"]
-        ]
-        self.assertEqual(grp_meds, sorted(grp_meds, reverse=True))
-        self.assertEqual(flat_meds[0], 6200.0)
-
-        # 2) Kerf = 3 mm -> 3000 + 3000 + 3 = 6003 > 6000 -> CATCH não fecha barra
+        # Kerf = 3 mm impede duas de 3000 mm na mesma barra de 6000 mm
+        kerf_bars = [_make_bar(3000.0, modelo="CATCH", qtd=2)]
         res_kerf = build_bar_optimization(
-            bars,
-            OptimizationConfig(
-                comprimento_barra_mm=6000.0,
-                perda_maxima_mm=200.0,
-                espessura_serra_mm=3.0,
-            ),
+            kerf_bars,
+            OptimizationConfig(comprimento_barra_mm=6000.0, espessura_serra_mm=3.0),
             self.rules,
         )
-        _assert_piece_conservation(self, bars, res_kerf)
-        catch_grp_k = next(g for g in res_kerf["grupos"] if g["grupo_nome"] == "CATCH — Lateral")
-        self.assertEqual(catch_grp_k["qtd_barras_6m"], 0)
-        self.assertEqual(catch_grp_k["total_pecas_nao_alocadas"], 2)
+        self.assertEqual(res_kerf["cenarios"]["material"]["resumo"]["total_barras"], 2)
 
-        # 3) Perda máxima configurável (ex.: 2100 mm permite fechar grupo RISK de 4033.333mm)
-        res_loose = build_bar_optimization(
-            bars,
-            OptimizationConfig(
-                comprimento_barra_mm=6000.0,
-                perda_maxima_mm=2100.0,
-            ),
+        # Desponte = 100 mm torna 5950 mm inviável
+        res_desp = build_bar_optimization(
+            [_make_bar(5950.0, modelo="RISK")],
+            OptimizationConfig(comprimento_barra_mm=6000.0, desponte_mm=100.0),
             self.rules,
         )
-        _assert_piece_conservation(self, bars, res_loose)
-        risk_grp = next(g for g in res_loose["grupos"] if g["grupo_nome"] == "RISK — Lateral")
-        self.assertEqual(risk_grp["qtd_barras_6m"], 1)
-        # Peças internas da barra ordenadas do maior para o menor
-        inner_meds = [p["medida_corte_mm"] for p in risk_grp["barras_fechadas"][0]["pecas"]]
-        self.assertEqual(inner_meds, sorted(inner_meds, reverse=True))
+        self.assertEqual(res_desp["cenarios"]["material"]["resumo"]["total_barras"], 0)
+        self.assertEqual(len(res_desp["pecas_inviaveis_flat"]), 1)
 
-        # 4) Separar por acabamento vs unificado
+        # Separar por acabamento
         acab_bars = [
             _make_bar(3000.0, modelo="RISK", acabamento="DAKAR"),
             _make_bar(3000.0, modelo="RISK", acabamento="STEEL"),
         ]
-        res_unified = build_bar_optimization(
-            acab_bars, OptimizationConfig(separar_por_acabamento=False), self.rules
-        )
-        self.assertEqual(res_unified["resumo"]["total_barras_6m"], 1)
         res_split = build_bar_optimization(
-            acab_bars, OptimizationConfig(separar_por_acabamento=True), self.rules
-        )
-        self.assertEqual(res_split["resumo"]["total_barras_6m"], 0)
-        self.assertEqual(res_split["resumo"]["total_grupos"], 2)
-
-        # 5) Desponte reduz comprimento útil
-        res_desp = build_bar_optimization(
-            [_make_bar(5950.0, modelo="RISK")],
-            OptimizationConfig(comprimento_barra_mm=6000.0, perda_maxima_mm=200.0, desponte_mm=100.0),
+            acab_bars,
+            OptimizationConfig(separar_por_acabamento=True),
             self.rules,
         )
-        self.assertEqual(res_desp["resumo"]["total_barras_6m"], 0)
-        self.assertIn("Maior que a barra útil", res_desp["nao_alocados_flat"][0]["motivo"])
+        self.assertEqual(res_split["cenarios"]["material"]["resumo"]["total_grupos"], 2)
+        self.assertEqual(res_split["cenarios"]["material"]["resumo"]["total_barras"], 2)
 
-    def test_group2_min_bars_3_to_2_and_kpis(self) -> None:
-        # [2500, 2400, 1900, 1800, 1400, 1300] (soma 11300mm): com perda_max=100mm (w_min=5900),
-        # nenhuma combinação fecha Grupo 1, mas Grupo 2 deve empacotar exatamente em 2 barras (5800 + 5500)
-        bars = [_make_bar(m, op=str(i + 1)) for i, m in enumerate((2500, 2400, 1900, 1800, 1400, 1300))]
-        cfg = OptimizationConfig(comprimento_barra_mm=6000.0, perda_maxima_mm=100.0)
-        res = build_bar_optimization(bars, cfg, self.rules)
-        _assert_piece_conservation(self, bars, res)
-
-        r = res["resumo"]
-        self.assertEqual(r["total_barras_6m"], 0)
-        self.assertEqual(r["total_pecas_nao_alocadas"], 6)
-        self.assertEqual(r["total_barras_grupo2"], 2)
-        self.assertEqual(r["total_pecas_alocadas_grupo2"], 6)
-        self.assertAlmostEqual(r["total_perda_grupo2_mm"], 700.0, places=3)
-        self.assertAlmostEqual(r["aproveitamento_medio_grupo2_pct"], 94.17, places=2)
-        self.assertEqual(r["total_barras_geral"], 2)
-        self.assertAlmostEqual(r["total_perda_geral_mm"], 700.0, places=3)
-        self.assertAlmostEqual(r["aproveitamento_medio_geral_pct"], 94.17, places=2)
-
-        # Verifica peça > barra útil separada em inviáveis sem perder conservação
-        bars_with_oversized = bars + [_make_bar(6250.0, op="99")]
-        res_ov = build_bar_optimization(bars_with_oversized, cfg, self.rules)
-        _assert_piece_conservation(self, bars_with_oversized, res_ov)
-        self.assertEqual(res_ov["resumo"]["total_pecas_inviaveis"], 1)
-        self.assertEqual(res_ov["resumo"]["total_barras_grupo2"], 2)
-        self.assertEqual(res_ov["nao_alocados_flat"][0]["medida_corte_mm"], 6250.0)
-
-    def test_real_samples_conservation_and_bounds(self) -> None:
-        cfg = OptimizationConfig(comprimento_barra_mm=6000.0, perda_maxima_mm=200.0)
+    def test_real_samples_conservation_comparison_and_speed(self) -> None:
+        cfg = OptimizationConfig(comprimento_barra_mm=6000.0)
         for sample in (SAMPLE_06_11, SAMPLE_13_11):
             if not sample.exists():
                 continue
@@ -312,16 +279,18 @@ class TestBarOptimizer(unittest.TestCase):
             res = build_bar_optimization(det, cfg, self.rules)
             elapsed = time.perf_counter() - t0
             self.assertLess(elapsed, 2.0, f"Tempo excessivo em {sample.name}: {elapsed:.2f}s")
-            _assert_piece_conservation(self, det, res)
-            for bar in res["barras_otimizadas_flat"]:
-                self.assertLessEqual(bar["perda_mm"], 200.0 + 1e-6)
-                self.assertGreaterEqual(bar["perda_mm"], 0.0)
-                meds = [p["medida_corte_mm"] for p in bar["pecas"]]
-                self.assertEqual(meds, sorted(meds, reverse=True))
-            flat_out = [p["medida_corte_mm"] for p in res["nao_alocados_flat"]]
-            self.assertEqual(flat_out, sorted(flat_out, reverse=True))
+            _assert_scenarios_conservation(self, det, res)
 
-    def test_api_optimize_rules_and_exports(self) -> None:
+            mat_r = res["cenarios"]["material"]["resumo"]
+            tmp_r = res["cenarios"]["tempo_execucao"]["resumo"]
+            self.assertLessEqual(mat_r["total_barras"], tmp_r["total_barras"])
+            self.assertLessEqual(tmp_r["total_ajustes_corte"], mat_r["total_ajustes_corte"])
+            self.assertEqual(
+                res["comparativo"]["reducao_ajustes_tempo_vs_material"],
+                mat_r["total_ajustes_corte"] - tmp_r["total_ajustes_corte"],
+            )
+
+    def test_api_two_scenarios_and_exports(self) -> None:
         rules_backup = RULES_FILE.read_text(encoding="utf-8")
         try:
             html_sample = """
@@ -355,7 +324,8 @@ class TestBarOptimizer(unittest.TestCase):
             self.assertEqual(res_ext.status_code, 200)
             data = res_ext.json()
             self.assertIn("otimizacao_barras", data)
-            self.assertEqual(data["otimizacao_barras"]["config"]["perda_maxima_mm"], 200.0)
+            self.assertIn("cenarios", data["otimizacao_barras"])
+            self.assertIn("comparativo", data["otimizacao_barras"])
 
             # Atualiza código do perfil lateral via PUT /api/rules para unificar CATCH e DJEI
             rules_data = self.client.get("/api/rules").json()["rules"]
@@ -365,14 +335,13 @@ class TestBarOptimizer(unittest.TestCase):
             self.assertEqual(res_put.status_code, 200)
             recalc = res_put.json()["recalculated"]
             opt_groups = {
-                g["grupo_nome"]: g for g in recalc["otimizacao_barras"]["grupos"]
+                g["grupo_nome"]: g
+                for g in recalc["otimizacao_barras"]["cenarios"]["material"]["grupos"]
             }
             self.assertIn("PERFIL-5307", opt_groups)
             self.assertEqual(opt_groups["PERFIL-5307"]["origem_agrupamento"], "codigo_perfil")
-            # 3x 2450 (2 CATCH + 1 DJEI) + 1x 1100 = 2450 + 2450 + 1100 = 6000!
-            self.assertGreaterEqual(opt_groups["PERFIL-5307"]["qtd_barras_6m"], 1)
 
-            # POST /api/optimize/bars com parâmetros customizados e validação de erro
+            # POST /api/optimize/bars valida desponte >= barra e aceita campo legado opcional
             res_bad = self.client.post(
                 "/api/optimize/bars",
                 json={"comprimento_barra_mm": 6000.0, "desponte_mm": 6000.0},
@@ -383,59 +352,242 @@ class TestBarOptimizer(unittest.TestCase):
                 "/api/optimize/bars",
                 json={
                     "comprimento_barra_mm": 6000.0,
-                    "perda_maxima_mm": 150.0,
-                    "espessura_serra_mm": 0.0,
+                    "espessura_serra_mm": 2.0,
                     "desponte_mm": 0.0,
                     "separar_por_acabamento": False,
+                    "perda_maxima_mm": 200.0,
                 },
             )
             self.assertEqual(res_opt.status_code, 200)
             opt_json = res_opt.json()
-            self.assertEqual(opt_json["config"]["perda_maxima_mm"], 150.0)
-            for kpi_key in (
-                "aproveitamento_medio_pct",
-                "total_perda_mm",
-                "aproveitamento_medio_grupo2_pct",
-                "total_perda_grupo2_mm",
-                "aproveitamento_medio_geral_pct",
-                "total_perda_geral_mm",
-            ):
-                self.assertIn(kpi_key, opt_json["resumo"])
+            self.assertIn("total_ajustes_corte", opt_json["cenarios"]["material"]["resumo"])
+            self.assertIn("roteiro_flat", opt_json["cenarios"]["tempo_execucao"])
 
-            # Exportações XLSX, CSV e JSON incluem dados da otimização (G1 e G2)
+            # Exportação XLSX contém as 4 novas abas de otimização
             res_xlsx = self.client.post("/api/export/xlsx", json={})
             self.assertEqual(res_xlsx.status_code, 200)
             wb = load_workbook(io.BytesIO(res_xlsx.content))
-            self.assertIn("Otimizacao_Barras_6m", wb.sheetnames)
-            self.assertIn("Otimizacao_Grupo2_Barras", wb.sheetnames)
-            self.assertIn("Otimizacao_Nao_Alocados", wb.sheetnames)
+            for sheet in (
+                "Otimizacao_Material",
+                "Otimizacao_Tempo_Roteiro",
+                "Otimizacao_Tempo_Barras",
+                "Otimizacao_Comparativo",
+            ):
+                self.assertIn(sheet, wb.sheetnames)
 
-            res_csv_b = self.client.post(
-                "/api/export/csv", json={"mode": "otimizacao_barras"}
+            # CSVs para Material, Roteiro e Barras (incluindo envio de bar_optimization filtrado)
+            res_csv_mat = self.client.post(
+                "/api/export/csv", json={"mode": "otimizacao_material"}
             )
-            self.assertEqual(res_csv_b.status_code, 200)
-            self.assertIn("Padrao_Corte", res_csv_b.text)
+            self.assertEqual(res_csv_mat.status_code, 200)
+            self.assertIn("Sequencia_Corte", res_csv_mat.text)
+            self.assertIn("Ajustes_Barra", res_csv_mat.text)
 
-            res_csv_g2 = self.client.post(
-                "/api/export/csv", json={"mode": "otimizacao_grupo2"}
+            res_csv_rot = self.client.post(
+                "/api/export/csv", json={"mode": "otimizacao_tempo_roteiro"}
             )
-            self.assertEqual(res_csv_g2.status_code, 200)
-            self.assertIn("Padrao_Corte", res_csv_g2.text)
+            self.assertEqual(res_csv_rot.status_code, 200)
+            self.assertIn("Origem_Barra", res_csv_rot.text)
 
-            res_csv_s = self.client.post(
-                "/api/export/csv", json={"mode": "otimizacao_sobras"}
+            res_csv_tmp = self.client.post(
+                "/api/export/csv",
+                json={"mode": "otimizacao_tempo_barras", "bar_optimization": opt_json},
             )
-            self.assertEqual(res_csv_s.status_code, 200)
-            self.assertIn("Medida_Corte_mm", res_csv_s.text)
+            self.assertEqual(res_csv_tmp.status_code, 200)
+            self.assertIn("Sequencia_Corte", res_csv_tmp.text)
 
             res_json = self.client.post("/api/export/json", json={})
             self.assertEqual(res_json.status_code, 200)
             json_body = res_json.json()
-            self.assertIn("otimizacao_barras", json_body)
-            self.assertIn("aproveitamento_medio_geral_pct", json_body["otimizacao_barras"]["resumo"])
+            self.assertIn("cenarios", json_body["otimizacao_barras"])
+            self.assertIn("comparativo", json_body["otimizacao_barras"])
         finally:
             RULES_FILE.write_text(rules_backup, encoding="utf-8")
             STORE.optimization_config = OptimizationConfig()
+
+    def test_angles_orientation_chaining_and_angle_change_count(self) -> None:
+        # 1) 4 peças assimétricas 45° / 90° em uma barra: alterna (45/90)->(90/45)->(45/90)->(90/45) => 4 trocas (vs 7 sem orientação)
+        mixed_bars = [_make_bar(1000.0, op="10", qtd=4, angulo_esq=45, angulo_dir=90)]
+        res_mixed = build_bar_optimization(mixed_bars, OptimizationConfig(), self.rules)
+        _assert_scenarios_conservation(self, mixed_bars, res_mixed)
+
+        for scen_id in ("material", "tempo_execucao"):
+            scen = res_mixed["cenarios"][scen_id]
+            self.assertEqual(scen["resumo"]["total_barras"], 1)
+            self.assertEqual(scen["resumo"]["total_trocas_angulo"], 4)
+            pcs = scen["barras_flat"][0]["pecas"]
+            pairs = [(p["angulo_esq"], p["angulo_dir"]) for p in pcs]
+            self.assertEqual(pairs, [(45, 90), (90, 45), (45, 90), (90, 45)])
+
+        # 2) Sequência mista [90/90, 45/90, 45/45] => 45/45 -> 45/90 -> 90/90 = apenas 1 troca total
+        seq_bars = [
+            _make_bar(1500.0, op="1", codigo="C1", angulo_esq=90, angulo_dir=90),
+            _make_bar(1500.0, op="2", codigo="C2", angulo_esq=45, angulo_dir=90),
+            _make_bar(1500.0, op="3", codigo="C3", angulo_esq=45, angulo_dir=45),
+        ]
+        res_seq = build_bar_optimization(seq_bars, OptimizationConfig(), self.rules)
+        _assert_scenarios_conservation(self, seq_bars, res_seq)
+        self.assertEqual(res_seq["cenarios"]["material"]["resumo"]["total_trocas_angulo"], 1)
+        self.assertEqual(res_seq["cenarios"]["tempo_execucao"]["resumo"]["total_trocas_angulo"], 1)
+
+        # 3) Integração com exports XLSX e CSV incluindo colunas de ângulos e trocas
+        res_opt = self.client.post(
+            "/api/optimize/bars",
+            json={
+                "comprimento_barra_mm": 6000.0,
+                "detailed_bars": seq_bars,
+            },
+        )
+        self.assertEqual(res_opt.status_code, 200)
+        opt_payload = res_opt.json()
+
+        res_csv_mat = self.client.post(
+            "/api/export/csv",
+            json={"mode": "otimizacao_material", "bar_optimization": opt_payload},
+        )
+        self.assertEqual(res_csv_mat.status_code, 200)
+        self.assertIn("Angulos_Barra", res_csv_mat.text)
+        self.assertIn("Trocas_Angulo_Barra", res_csv_mat.text)
+
+        res_csv_rot = self.client.post(
+            "/api/export/csv",
+            json={"mode": "otimizacao_tempo_roteiro", "bar_optimization": opt_payload},
+        )
+        self.assertEqual(res_csv_rot.status_code, 200)
+        self.assertIn("Angulos_Corte", res_csv_rot.text)
+        self.assertIn("Troca_Angulo", res_csv_rot.text)
+
+        res_xlsx = self.client.post(
+            "/api/export/xlsx",
+            json={"bar_optimization": opt_payload},
+        )
+        self.assertEqual(res_xlsx.status_code, 200)
+        wb = load_workbook(io.BytesIO(res_xlsx.content))
+        mat_headers = [c.value for c in wb["Otimizacao_Material"][1]]
+        rot_headers = [c.value for c in wb["Otimizacao_Tempo_Roteiro"][1]]
+        cmp_headers = [c.value for c in wb["Otimizacao_Comparativo"][1]]
+        self.assertIn("Angulos_Barra", mat_headers)
+        self.assertIn("Trocas_Angulo_Barra", mat_headers)
+        self.assertIn("Angulos_Corte", rot_headers)
+        self.assertIn("Troca_Angulo", rot_headers)
+        self.assertIn("Material_Trocas_Angulo", cmp_headers)
+        self.assertIn("Tempo_Trocas_Angulo", cmp_headers)
+
+    def test_symmetric_profile_parallel_nesting_vs_v_cut(self) -> None:
+        cfg = OptimizationConfig(comprimento_barra_mm=6000.0)
+
+        # 6 peças de 1030mm (45°/45°, largura 45mm) em barra de 6000mm:
+        # - Assimétrico (\/): soma = 6180mm -> exige 2 barras
+        asym_bars = [
+            _make_bar(
+                1030.0,
+                qtd=6,
+                angulo_esq=45,
+                angulo_dir=45,
+                perfil_simetrico=False,
+                largura_perfil_mm=45.0,
+            )
+        ]
+        res_asym = build_bar_optimization(asym_bars, cfg, self.rules)
+        _assert_scenarios_conservation(self, asym_bars, res_asym)
+        for scen_id in ("material", "tempo_execucao"):
+            scen = res_asym["cenarios"][scen_id]
+            self.assertEqual(scen["resumo"]["total_barras"], 2)
+            self.assertEqual(scen["resumo"]["total_economia_chanfro_mm"], 0.0)
+            self.assertEqual(scen["resumo"]["total_cortes_paralelos"], 0)
+            self.assertGreater(scen["resumo"]["total_cortes_v"], 0)
+            for bar in scen["barras_flat"]:
+                self.assertFalse(bar["perfil_simetrico"])
+                self.assertEqual(bar["cortes_paralelos_qtd"], 0)
+                self.assertEqual(bar["economia_chanfro_mm"], 0.0)
+                self.assertTrue(all(not p["invertida"] for p in bar["pecas"]))
+                self.assertEqual(bar["pecas"][0]["juncao_entrada"], "")
+                if len(bar["pecas"]) > 1:
+                    self.assertTrue(all(p["juncao_entrada"] == "\\/" for p in bar["pecas"][1:]))
+
+        # - Simétrico (// com giro 180°): 5 encaixes * 45mm = 225mm recuperados -> 5955mm -> 1 barra!
+        sym_bars = [
+            _make_bar(
+                1030.0,
+                qtd=6,
+                angulo_esq=45,
+                angulo_dir=45,
+                perfil_simetrico=True,
+                largura_perfil_mm=45.0,
+            )
+        ]
+        res_sym = build_bar_optimization(sym_bars, cfg, self.rules)
+        _assert_scenarios_conservation(self, sym_bars, res_sym)
+        for scen_id in ("material", "tempo_execucao"):
+            scen = res_sym["cenarios"][scen_id]
+            self.assertEqual(scen["resumo"]["total_barras"], 1)
+            self.assertAlmostEqual(scen["resumo"]["total_economia_chanfro_mm"], 225.0, places=3)
+            self.assertEqual(scen["resumo"]["total_cortes_paralelos"], 5)
+            self.assertEqual(scen["resumo"]["total_cortes_v"], 0)
+            bar = scen["barras_flat"][0]
+            self.assertTrue(bar["perfil_simetrico"])
+            self.assertAlmostEqual(bar["consumido_mm"], 5955.0, places=3)
+            self.assertAlmostEqual(bar["perda_mm"], 45.0, places=3)
+            self.assertAlmostEqual(bar["aproveitamento_pct"], 99.25, places=2)
+            self.assertAlmostEqual(bar["economia_chanfro_mm"], 225.0, places=3)
+            self.assertEqual(bar["cortes_paralelos_qtd"], 5)
+            self.assertEqual(bar["cortes_v_qtd"], 0)
+            self.assertEqual(
+                [p["invertida"] for p in bar["pecas"]],
+                [False, True, False, True, False, True],
+            )
+            self.assertEqual(bar["pecas"][0]["juncao_entrada"], "")
+            self.assertTrue(all(p["juncao_entrada"] == "//" for p in bar["pecas"][1:]))
+
+        # Simétrico com largura 0mm: alterna orientação e marca "//", porém com economia 0.0 mm
+        sym_zero_w = [
+            _make_bar(
+                1000.0,
+                qtd=3,
+                angulo_esq=45,
+                angulo_dir=45,
+                perfil_simetrico=True,
+                largura_perfil_mm=0.0,
+            )
+        ]
+        res_zero_w = build_bar_optimization(sym_zero_w, cfg, self.rules)
+        _assert_scenarios_conservation(self, sym_zero_w, res_zero_w)
+        bar_zw = res_zero_w["cenarios"]["material"]["barras_flat"][0]
+        self.assertEqual([p["invertida"] for p in bar_zw["pecas"]], [False, True, False])
+        self.assertEqual([p["juncao_entrada"] for p in bar_zw["pecas"]], ["", "//", "//"])
+        self.assertEqual(bar_zw["cortes_paralelos_qtd"], 2)
+        self.assertEqual(bar_zw["economia_chanfro_mm"], 0.0)
+
+        # Exports CSV e XLSX com as colunas de simetria e economia de chanfro
+        res_csv_mat = self.client.post(
+            "/api/export/csv",
+            json={"mode": "otimizacao_material", "bar_optimization": res_sym},
+        )
+        self.assertEqual(res_csv_mat.status_code, 200)
+        for col in ("Perfil_Simetrico", "Cortes_Paralelos", "Cortes_V", "Economia_Chanfro_mm"):
+            self.assertIn(col, res_csv_mat.text)
+
+        res_csv_rot = self.client.post(
+            "/api/export/csv",
+            json={"mode": "otimizacao_tempo_roteiro", "bar_optimization": res_sym},
+        )
+        self.assertEqual(res_csv_rot.status_code, 200)
+        self.assertIn("Perfil_Simetrico", res_csv_rot.text)
+
+        res_xlsx = self.client.post(
+            "/api/export/xlsx",
+            json={"bar_optimization": res_sym},
+        )
+        self.assertEqual(res_xlsx.status_code, 200)
+        wb = load_workbook(io.BytesIO(res_xlsx.content))
+        mat_headers = [c.value for c in wb["Otimizacao_Material"][1]]
+        rot_headers = [c.value for c in wb["Otimizacao_Tempo_Roteiro"][1]]
+        cmp_headers = [c.value for c in wb["Otimizacao_Comparativo"][1]]
+        for col in ("Perfil_Simetrico", "Cortes_Paralelos", "Cortes_V", "Economia_Chanfro_mm"):
+            self.assertIn(col, mat_headers)
+        self.assertIn("Perfil_Simetrico", rot_headers)
+        self.assertIn("Material_Economia_Chanfro_mm", cmp_headers)
+        self.assertIn("Tempo_Economia_Chanfro_mm", cmp_headers)
 
 
 if __name__ == "__main__":

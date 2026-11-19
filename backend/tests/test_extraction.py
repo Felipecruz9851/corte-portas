@@ -360,6 +360,227 @@ class TestExtractionAndCutting(unittest.TestCase):
         self.assertEqual(g_dup.largura_corte_mm, 450.0)
         self.assertEqual(g_dup.altura_corte_mm, 980.0)
 
+    def test_api_extract_multiple_html_files_and_clear_session(self) -> None:
+        html_a = """
+        <html><body>
+        LOCAL DE PRODUÇÃO = <b>PORTAS</b> DATA DE ABERTURA = <b>2026-11-18</b>
+        <table>
+          <tr><td><b>Data de Entrega 25/11/2026:</b></td></tr>
+          <tr>
+            <td>2PTAC1</td>
+            <td>PORTA BATER CATCH C/PUXADOR LATERAL - DIREITA - LARGURA 500 - ALTURA 2400 - PERFIL DAKAR - PLACA INCOLOR</td>
+            <td>1</td><td>20001</td><td></td><td>6001</td><td>1</td><td>SALA</td>
+          </tr>
+        </table>
+        </body></html>
+        """
+        html_b = """
+        <html><body>
+        LOCAL DE PRODUÇÃO = <b>PORTAS</b> DATA DE ABERTURA = <b>2026-11-19</b>
+        <table>
+          <tr><td><b>Data de Entrega 26/11/2026:</b></td></tr>
+          <tr>
+            <td>2PTAC2</td>
+            <td>PORTA BATER CATCH C/PUXADOR LATERAL - DIREITA - LARGURA 500 - ALTURA 2400 - PERFIL DAKAR - PLACA INCOLOR</td>
+            <td>1</td><td>20002</td><td></td><td>6002</td><td>1</td><td>COZINHA</td>
+          </tr>
+        </table>
+        </body></html>
+        """
+
+        # 1) Upload múltiplo consolidado via files[]
+        res_multi = self.client.post(
+            "/api/extract/html",
+            json={
+                "files": [
+                    {"html": html_a, "source_name": "lote_a.html"},
+                    {"html": html_b, "source_name": "lote_b.html"},
+                ]
+            },
+        )
+        self.assertEqual(res_multi.status_code, 200)
+        data_multi = res_multi.json()
+        self.assertEqual(data_multi["meta"]["total_linhas"], 2)
+        self.assertEqual(len(data_multi["meta"]["consultas"]), 2)
+        self.assertEqual(
+            [c["origem"] for c in data_multi["meta"]["consultas"]],
+            ["lote_a.html", "lote_b.html"],
+        )
+        self.assertTrue(all(c["total_linhas"] == 1 for c in data_multi["meta"]["consultas"]))
+        self.assertEqual(
+            data_multi["meta"]["datas_abertura"],
+            ["2026-11-18", "2026-11-19"],
+        )
+        self.assertGreater(data_multi["kpis"]["total_barras_corte"], 0)
+        # Duas portas CATCH com lateral 2400mm (1 por HTML) somam 4800mm <= 6000mm
+        # + horizontais 500mm => otimização consolida peças dos dois HTMLs em barras 6m
+        self.assertEqual(
+            data_multi["otimizacao_barras"]["cenarios"]["material"]["resumo"]["total_pecas_entrada"],
+            data_multi["kpis"]["total_barras_corte"],
+        )
+        self.assertEqual(
+            data_multi["otimizacao_barras"]["cenarios"]["tempo_execucao"]["resumo"]["total_pecas_entrada"],
+            data_multi["kpis"]["total_barras_corte"],
+        )
+
+        # 2) Retrocompatibilidade com payload único {html, source_name}
+        res_single = self.client.post(
+            "/api/extract/html",
+            json={"html": html_a, "source_name": "lote_a.html"},
+        )
+        self.assertEqual(res_single.status_code, 200)
+        self.assertEqual(res_single.json()["meta"]["total_linhas"], 1)
+
+        # 3) Validações HTTP 400
+        self.assertEqual(self.client.post("/api/extract/html", json={}).status_code, 400)
+        self.assertEqual(
+            self.client.post("/api/extract/html", json={"files": []}).status_code, 400
+        )
+        res_empty_file = self.client.post(
+            "/api/extract/html",
+            json={"files": [{"html": "   ", "source_name": "vazio.html"}]},
+        )
+        self.assertEqual(res_empty_file.status_code, 400)
+        self.assertIn("vazio.html", res_empty_file.json()["detail"])
+
+        # 4) Limpeza da sessão via POST /api/session/clear
+        res_clear = self.client.post("/api/session/clear")
+        self.assertEqual(res_clear.status_code, 200)
+        self.assertEqual(res_clear.json(), {"status": "cleared"})
+        self.assertEqual(self.client.post("/api/export/json", json={}).status_code, 400)
+
+    def test_cut_angles_per_end_mixed_and_dividers(self) -> None:
+        rules_backup = RULES_FILE_PATH = Path(BACKEND_DIR / "app" / "data" / "regras_corte.json").read_text(encoding="utf-8")
+        try:
+            mixed_rules = dict(self.rules)
+            mixed_rules["CATCH"] = CuttingRule(
+                modelo="CATCH",
+                descricao="Catch misto",
+                tipo_corte="45° / 90° (Misto)",
+                desconto_vertical_mm=0.0,
+                desconto_horizontal_mm=0.0,
+                desconto_divisoria_mm=0.0,
+                angulo_corte_quadro=45,
+                angulo_corte_puxador=90,
+                angulo_corte_divisoria=90,
+                perfil_simetrico_lateral=True,
+                perfil_simetrico_puxador=False,
+                largura_perfil_quadro_mm=45.0,
+                largura_perfil_puxador_mm=80.0,
+            )
+
+            def make_row(codigo: str, desc: str) -> RawOpRow:
+                return RawOpRow(
+                    local_producao="PORTAS",
+                    data_abertura="2026-11-19",
+                    data_entrega="26/11/2026",
+                    codigo=codigo,
+                    descricao=desc,
+                    quantidade=1.0,
+                    op="200100",
+                    observacao="",
+                    pedido="300100",
+                    item_pedido="1",
+                    ambiente="SALA",
+                    valor_insumos=None,
+                    valor_mp=None,
+                )
+
+            # 0 puxadores -> Quadro 45° / 45°
+            bars_0 = compute_item_cuts(
+                parse_description(
+                    make_row(
+                        "2PTAC0",
+                        "PORTA BATER CATCH S/PUXADOR - DIREITA - LARGURA 500 - ALTURA 2000 - PERFIL DAKAR - PLACA INCOLOR",
+                    )
+                ),
+                mixed_rules,
+            )
+            self.assertEqual({(b.angulo_esq, b.angulo_dir) for b in bars_0}, {(45, 45)})
+
+            # 1 puxador lateral + travessa -> Puxador 90°/90°, Quadro Vert 45°/45°, Quadro Horiz 45°/90°, Divisória 90°/90°
+            bars_lat = compute_item_cuts(
+                parse_description(
+                    make_row(
+                        "2PTAC1",
+                        "PORTA BATER CATCH C/PUXADOR LATERAL - DIREITA - LARGURA 500 - ALTURA 2000 - PERFIL DAKAR - PLACA INCOLOR - TRAVESSA A 1000MM",
+                    )
+                ),
+                mixed_rules,
+            )
+            by_fn_lat = {b.funcao_barra: (b.angulo_esq, b.angulo_dir, b.angulos_corte) for b in bars_lat}
+            self.assertEqual(by_fn_lat["Vertical c/ Puxador (DIREITA)"], (90, 90, "90° / 90°"))
+            self.assertEqual(by_fn_lat["Vertical Quadro"], (45, 45, "45° / 45°"))
+            self.assertEqual(by_fn_lat["Horizontal Quadro"], (45, 90, "45° / 90°"))
+            self.assertEqual(by_fn_lat["Travessa Divisória Interna"], (90, 90, "90° / 90°"))
+            sim_by_fn = {
+                b.funcao_barra: (b.perfil_simetrico, b.largura_perfil_mm)
+                for b in bars_lat
+            }
+            self.assertEqual(sim_by_fn["Vertical Quadro"], (True, 45.0))
+            self.assertEqual(sim_by_fn["Horizontal Quadro"], (True, 45.0))
+            self.assertEqual(sim_by_fn["Vertical c/ Puxador (DIREITA)"], (False, 80.0))
+
+            # 1 puxador superior -> Horiz Pux 90°/90°, Horiz Quadro 45°/45°, Vert Quadro 45°/90°
+            bars_sup = compute_item_cuts(
+                parse_description(
+                    make_row(
+                        "2PTAC2",
+                        "PORTA BATER CATCH C/PUXADOR SUPERIOR - DIREITA - LARGURA 500 - ALTURA 1000 - PERFIL DAKAR - PLACA INCOLOR",
+                    )
+                ),
+                mixed_rules,
+            )
+            by_fn_sup = {b.funcao_barra: (b.angulo_esq, b.angulo_dir) for b in bars_sup}
+            self.assertEqual(by_fn_sup["Horizontal c/ Puxador"], (90, 90))
+            self.assertEqual(by_fn_sup["Horizontal Quadro"], (45, 45))
+            self.assertEqual(by_fn_sup["Vertical Quadro"], (45, 90))
+
+            # 2 puxadores -> Vert Pux 90°/90°, Horiz Quadro 90°/90°
+            bars_dup = compute_item_cuts(
+                parse_description(
+                    make_row(
+                        "2PTAC3",
+                        "PORTA CORRER CATCH C/ PUXADOR DIREITO E ESQUERDO - LARGURA 800 - ALTURA 2200 - PERFIL DAKAR - PLACA INCOLOR",
+                    )
+                ),
+                mixed_rules,
+            )
+            self.assertEqual({(b.angulo_esq, b.angulo_dir) for b in bars_dup}, {(90, 90)})
+
+            # Barra linear avulsa -> sempre 90° / 90°
+            bars_av = compute_item_cuts(
+                parse_description(
+                    make_row(
+                        "2BARRA1",
+                        "BARRA ALLU - ENVIAR SOMENTE A BARRA CORTADA COM LARGURA DE 1200 MM",
+                    )
+                ),
+                mixed_rules,
+            )
+            self.assertEqual((bars_av[0].angulo_esq, bars_av[0].angulo_dir), (90, 90))
+
+            # Round-trip PUT /api/rules preservando novos campos angulo_corte_*
+            rules_api = self.client.get("/api/rules").json()["rules"]
+            rules_api["CATCH"]["tipo_corte"] = "45° / 90° (Misto)"
+            rules_api["CATCH"]["angulo_corte_quadro"] = 45
+            rules_api["CATCH"]["angulo_corte_puxador"] = 90
+            rules_api["CATCH"]["angulo_corte_divisoria"] = 90
+            rules_api["CATCH"]["perfil_simetrico_lateral"] = True
+            rules_api["CATCH"]["perfil_simetrico_puxador"] = False
+            res_put = self.client.put("/api/rules", json={"rules": rules_api})
+            self.assertEqual(res_put.status_code, 200)
+            catch_saved = res_put.json()["rules"]["CATCH"]
+            self.assertEqual(catch_saved["angulo_corte_quadro"], 45)
+            self.assertEqual(catch_saved["angulo_corte_puxador"], 90)
+            self.assertEqual(catch_saved["angulo_corte_divisoria"], 90)
+            self.assertIs(catch_saved["perfil_simetrico_lateral"], True)
+            self.assertIs(catch_saved["perfil_simetrico_puxador"], False)
+        finally:
+            Path(BACKEND_DIR / "app" / "data" / "regras_corte.json").write_text(
+                rules_backup, encoding="utf-8"
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

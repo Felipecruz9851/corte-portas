@@ -326,6 +326,7 @@ export default function PieceDetailDialog({
                     <thead>
                       <tr>
                         <th>Função</th>
+                        <th>Ângulos</th>
                         <th className="num-header">Qtd</th>
                         <th className="num-header">Nominal</th>
                         <th className="num-header">Desc.</th>
@@ -337,6 +338,9 @@ export default function PieceDetailDialog({
                       {(item.barras_corte || []).map((b, i) => (
                         <tr key={i}>
                           <td>{b.funcao_barra}</td>
+                          <td className="font-mono text-xs whitespace-nowrap">
+                            {b.angulos_corte || b.tipo_corte}
+                          </td>
                           <td className="num font-medium">{b.qtd_barras}</td>
                           <td className="num">{fmtNum(b.medida_nominal_mm)}</td>
                           <td className="num text-lider-wood">

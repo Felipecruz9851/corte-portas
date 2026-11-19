@@ -25,6 +25,8 @@ export default function BarsCutTab({ groupedBars = [], detailedBars = [], items 
           r.codigo_perfil,
           r.acabamento_perfil,
           r.funcao_barra,
+          r.angulos_corte,
+          r.tipo_corte,
           r.ops,
         ]
           .join(" ")
@@ -205,7 +207,7 @@ export default function BarsCutTab({ groupedBars = [], detailedBars = [], items 
                     <th>Função da Barra</th>
                     <th>Orientação</th>
                     <th>Puxador?</th>
-                    <th>Tipo Corte</th>
+                    <th>Ângulos / Corte</th>
                     <th className="num-header">Qtd Barras</th>
                     <th className="num-header">Medida Corte (mm)</th>
                     <th className="num-header">Total (m)</th>
@@ -241,7 +243,9 @@ export default function BarsCutTab({ groupedBars = [], detailedBars = [], items 
                           <span className="text-lider-muted">Não</span>
                         )}
                       </td>
-                      <td data-label="Tipo Corte">{r.tipo_corte}</td>
+                      <td data-label="Ângulos / Corte" className="font-mono text-xs whitespace-nowrap">
+                        {r.angulos_corte || r.tipo_corte}
+                      </td>
                       <td data-label="Qtd Barras" className="num font-medium">
                         {r.qtd_barras}
                       </td>
@@ -269,6 +273,7 @@ export default function BarsCutTab({ groupedBars = [], detailedBars = [], items 
                     <th>Cód. Perfil</th>
                     <th>Acabamento</th>
                     <th>Função da Barra</th>
+                    <th>Ângulos</th>
                     <th className="num-header">Qtd</th>
                     <th className="num-header">Nominal (mm)</th>
                     <th className="num-header">Desc. (mm)</th>
@@ -304,6 +309,9 @@ export default function BarsCutTab({ groupedBars = [], detailedBars = [], items 
                       </td>
                       <td data-label="Acabamento">{r.acabamento_perfil}</td>
                       <td data-label="Função da Barra">{r.funcao_barra}</td>
+                      <td data-label="Ângulos" className="font-mono text-xs whitespace-nowrap">
+                        {r.angulos_corte || r.tipo_corte}
+                      </td>
                       <td data-label="Qtd" className="num font-medium">
                         {r.qtd_barras}
                       </td>

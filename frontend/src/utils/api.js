@@ -1,3 +1,11 @@
+function extractErrorDetail(payload, fallback) {
+  const detail = payload?.detail;
+  if (Array.isArray(detail)) {
+    return detail.map((d) => d?.msg || JSON.stringify(d)).join("; ") || fallback;
+  }
+  return detail || fallback;
+}
+
 export async function fetchJson(url, options = {}) {
   const response = await fetch(url, {
     headers: { "Content-Type": "application/json" },
@@ -5,7 +13,7 @@ export async function fetchJson(url, options = {}) {
   });
   const data = await response.json().catch(() => ({}));
   if (!response.ok) {
-    throw new Error(data.detail || `Erro HTTP ${response.status}`);
+    throw new Error(extractErrorDetail(data, `Erro HTTP ${response.status}`));
   }
   return data;
 }
@@ -18,7 +26,7 @@ export async function downloadExportFile(endpoint, body, fallbackFilename) {
   });
   if (!response.ok) {
     const err = await response.json().catch(() => ({}));
-    throw new Error(err.detail || "Falha ao gerar arquivo.");
+    throw new Error(extractErrorDetail(err, "Falha ao gerar arquivo."));
   }
   const blob = await response.blob();
   const url = URL.createObjectURL(blob);

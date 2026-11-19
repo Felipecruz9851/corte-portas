@@ -1,13 +1,13 @@
 ---
 modulo: "description_parser.py + cutting_engine.py"
 tipo: "dominio"
-data_atualizacao: 2026-11-18
+data_atualizacao: 2026-11-19
 tags: [regras-negocio, calculo, parametros, portas]
 ---
 
 # Regra: Extração Construtiva e Cálculo de Corte de Perfis
 
-**Contexto:** Converte descrições textuais heterogêneas do PCP (`PORTAS`) em especificações estruturadas de construção e lista de barras de corte com descontos por modelo.
+**Contexto:** Converte descrições textuais heterogêneas do PCP (`PORTAS`) em especificações estruturadas de construção e lista de barras de corte com descontos por modelo. O sistema combina **regras paramétricas declarativas** em `./backend/app/data/regras_corte.json` (editáveis na interface web e via `PUT /api/rules`) com **regras estruturais e textuais** implementadas em Python (`./backend/app/description_parser.py`, `./backend/app/cutting_engine.py`, `./backend/app/html_parser.py` e `./backend/app/bar_optimizer.py`).
 
 ## Lógica e Parâmetros
 
@@ -30,6 +30,12 @@ tags: [regras-negocio, calculo, parametros, portas]
   - **Cristaleira Provence Urda:** Utiliza os comprimentos explícitos do perfil `MINI KENDO + BAGUETE` informados na descrição.
 - **Saída Esperada:**
   - Lista de `ExtractedItem` (medidas, modelo, puxadores, divisórias, acabamentos, furação), `CutBar` por OP e resumo agrupado para serra.
+
+## Documentação Aprofundada
+
+- [[03-Dominio-Calculos/Guia-Completo-Regras-e-Manutencao]] — Funcionamento completo das 5 camadas, invariantes, playbooks para inserir/alterar modelos e parâmetros, protocolos de teste e roadmap arquitetural.
+- [[03-Dominio-Calculos/Catalogo-Modelos-e-Particularidades]] — Fichas técnicas dos 12 modelos e 8 categorias com exemplos reais do ERP e cálculos passo a passo.
+- [[03-Dominio-Calculos/Otimizacao-Barras-6m]] — Regras de agrupamento por código de perfil e otimização linear nos 2 cenários (`material` e `tempo_execucao`).
 
 ## Dependências
 

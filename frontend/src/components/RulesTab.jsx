@@ -22,6 +22,11 @@ export default function RulesTab({
     setDraftRules((prev) => {
       const current = { ...prev[key] };
       if (
+        field === "perfil_simetrico_lateral" ||
+        field === "perfil_simetrico_puxador"
+      ) {
+        current[field] = Boolean(rawValue);
+      } else if (
         field === "tipo_corte" ||
         field === "codigo_perfil_lateral" ||
         field === "codigo_perfil_puxador"
@@ -29,6 +34,35 @@ export default function RulesTab({
         current[field] = rawValue;
       } else {
         current[field] = rawValue === "" ? "" : Number(rawValue);
+      }
+
+      if (field === "tipo_corte") {
+        if (rawValue === "45°") {
+          current.angulo_corte_quadro = 45;
+          current.angulo_corte_puxador = 45;
+        } else if (rawValue === "45° / 90° (Misto)") {
+          current.angulo_corte_quadro = 45;
+          current.angulo_corte_puxador = 90;
+        } else if (rawValue === "90° (Topo)" || rawValue === "90° (Explícito)") {
+          current.angulo_corte_quadro = 90;
+          current.angulo_corte_puxador = 90;
+        }
+      } else if (
+        field === "angulo_corte_quadro" ||
+        field === "angulo_corte_puxador"
+      ) {
+        const aq = Number(current.angulo_corte_quadro) === 90 ? 90 : 45;
+        const ap = Number(current.angulo_corte_puxador) === 90 ? 90 : 45;
+        if (aq === 45 && ap === 45) {
+          current.tipo_corte = "45°";
+        } else if (aq !== ap) {
+          current.tipo_corte = "45° / 90° (Misto)";
+        } else {
+          current.tipo_corte =
+            current.tipo_corte === "90° (Explícito)"
+              ? "90° (Explícito)"
+              : "90° (Topo)";
+        }
       }
 
       if (
@@ -52,6 +86,11 @@ export default function RulesTab({
       const r = draftRules[key];
       normalized[key] = {
         ...r,
+        angulo_corte_quadro: Number(r.angulo_corte_quadro) === 90 ? 90 : 45,
+        angulo_corte_puxador: Number(r.angulo_corte_puxador) === 90 ? 90 : 45,
+        angulo_corte_divisoria: Number(r.angulo_corte_divisoria) === 90 ? 90 : 45,
+        perfil_simetrico_lateral: Boolean(r.perfil_simetrico_lateral),
+        perfil_simetrico_puxador: Boolean(r.perfil_simetrico_puxador),
         codigo_perfil_lateral: String(r.codigo_perfil_lateral || "").trim(),
         codigo_perfil_puxador: String(r.codigo_perfil_puxador || "").trim(),
         largura_perfil_quadro_mm: Number(r.largura_perfil_quadro_mm) || 0,
@@ -83,7 +122,7 @@ export default function RulesTab({
             )}
           </div>
           <p className="text-xs text-lider-slate leading-relaxed">
-            Perfis: cadastre os códigos de perfil (Lateral e Puxador) para unificar o agrupamento na otimização de barras de 6 m (quando vazios, agrupa por Modelo + Tipo). Quando o puxador for mais largo que o quadro (ex.: Clear G = 80 vs 45 mm), desconta a diferença (35 mm) das barras adjacentes. Vidros: informe o desconto por lado sem puxador (Lateral) e com puxador (Puxador).
+            Perfis e ângulos: configure os ângulos de encontro (Quadro, Puxador e Divisória — gerando peças mistas 45° / 90° nas barras adjacentes quando diferentes), marque se o perfil é simétrico (permite girar 180° para encaixe paralelo //; sem giro corta em \/) e cadastre os códigos de perfil para unificar a otimização 6 m. Quando o puxador for mais largo que o quadro (ex.: Clear G = 80 vs 45 mm), desconta a diferença (35 mm) das barras adjacentes. Vidros: informe o desconto por lado sem puxador (Lateral) e com puxador (Puxador).
           </p>
         </div>
 
@@ -129,6 +168,15 @@ export default function RulesTab({
               <th>Modelo</th>
               <th>Descrição</th>
               <th>Tipo de Corte</th>
+              <th>Âng. Quadro</th>
+              <th>Âng. Puxador</th>
+              <th>Âng. Divisória</th>
+              <th title="Perfil lateral simétrico permite girar 180° na serra (//); desmarcado corta em \/">
+                Simét. Lat. (//)
+              </th>
+              <th title="Perfil puxador simétrico permite girar 180° na serra (//); desmarcado corta em \/">
+                Simét. Pux. (//)
+              </th>
               <th>Cód. Perfil Lateral</th>
               <th>Cód. Perfil Puxador</th>
               <th className="num-header">Larg. Quadro (mm)</th>
@@ -145,7 +193,7 @@ export default function RulesTab({
           <tbody>
             {!sortedKeys.length ? (
               <tr>
-                <td colSpan={14} className="empty-cell text-center py-12 text-lider-muted">
+                <td colSpan={19} className="empty-cell text-center py-12 text-lider-muted">
                   Carregando regras de corte...
                 </td>
               </tr>
@@ -156,6 +204,8 @@ export default function RulesTab({
                   "w-24 h-8 px-2 bg-lider-surface border border-lider-border rounded-[2px] text-right font-mono text-xs text-lider-ink tabular-nums focus:border-lider-wood focus:outline-none transition-colors";
                 const codeInputCls =
                   "w-28 h-8 px-2 bg-lider-surface border border-lider-border rounded-[2px] text-left font-mono text-xs text-lider-ink placeholder:text-lider-muted/60 focus:border-lider-wood focus:outline-none transition-colors";
+                const angleSelectCls =
+                  "h-8 px-2 bg-lider-surface border border-lider-border rounded-[2px] font-mono text-xs text-lider-ink focus:border-lider-wood focus:outline-none";
                 return (
                   <tr key={key}>
                     <th scope="row">
@@ -176,9 +226,95 @@ export default function RulesTab({
                         className="h-8 px-2 bg-lider-surface border border-lider-border rounded-[2px] text-xs text-lider-ink focus:border-lider-wood focus:outline-none"
                       >
                         <option value="45°">45°</option>
+                        <option value="45° / 90° (Misto)">45° / 90° (Misto)</option>
                         <option value="90° (Topo)">90° (Topo)</option>
                         <option value="90° (Explícito)">90° (Explícito)</option>
                       </select>
+                    </td>
+                    <td>
+                      <select
+                        value={Number(r.angulo_corte_quadro) === 90 ? 90 : 45}
+                        onChange={(e) =>
+                          handleFieldChange(
+                            key,
+                            "angulo_corte_quadro",
+                            e.target.value
+                          )
+                        }
+                        aria-label={`Ângulo de corte quadro para ${r.modelo}`}
+                        className={angleSelectCls}
+                      >
+                        <option value={45}>45°</option>
+                        <option value={90}>90°</option>
+                      </select>
+                    </td>
+                    <td>
+                      <select
+                        value={Number(r.angulo_corte_puxador) === 90 ? 90 : 45}
+                        onChange={(e) =>
+                          handleFieldChange(
+                            key,
+                            "angulo_corte_puxador",
+                            e.target.value
+                          )
+                        }
+                        aria-label={`Ângulo de corte puxador para ${r.modelo}`}
+                        className={angleSelectCls}
+                      >
+                        <option value={45}>45°</option>
+                        <option value={90}>90°</option>
+                      </select>
+                    </td>
+                    <td>
+                      <select
+                        value={Number(r.angulo_corte_divisoria) === 90 ? 90 : 45}
+                        onChange={(e) =>
+                          handleFieldChange(
+                            key,
+                            "angulo_corte_divisoria",
+                            e.target.value
+                          )
+                        }
+                        aria-label={`Ângulo de corte divisória para ${r.modelo}`}
+                        className={angleSelectCls}
+                      >
+                        <option value={90}>90°</option>
+                        <option value={45}>45°</option>
+                      </select>
+                    </td>
+                    <td className="text-center">
+                      <label className="inline-flex items-center justify-center cursor-pointer">
+                        <input
+                          type="checkbox"
+                          checked={Boolean(r.perfil_simetrico_lateral)}
+                          onChange={(e) =>
+                            handleFieldChange(
+                              key,
+                              "perfil_simetrico_lateral",
+                              e.target.checked
+                            )
+                          }
+                          aria-label={`Perfil lateral simétrico (girar 180° //) para ${r.modelo}`}
+                          className="w-4 h-4 rounded-[2px] border-lider-border text-lider-wood focus:ring-lider-wood cursor-pointer"
+                        />
+                      </label>
+                    </td>
+                    <td className="text-center">
+                      <label className="inline-flex items-center justify-center cursor-pointer">
+                        <input
+                          type="checkbox"
+                          checked={Boolean(r.perfil_simetrico_puxador)}
+                          onChange={(e) =>
+                            handleFieldChange(
+                              key,
+                              "perfil_simetrico_puxador",
+                              e.target.checked
+                            )
+                          }
+                          aria-label={`Perfil puxador simétrico (girar 180° //) para ${r.modelo}`}
+                          className="w-4 h-4 rounded-[2px] border-lider-border text-lider-wood focus:ring-lider-wood cursor-pointer"
+                        />
+                      </label>
                     </td>
                     <td>
                       <input

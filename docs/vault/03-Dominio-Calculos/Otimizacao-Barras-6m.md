@@ -5,9 +5,9 @@ data_atualizacao: 2026-11-19
 tags: [regras-negocio, otimizacao, barras-6m, cutting-stock, portas]
 ---
 
-# Regra: Otimização Linear de Barras de 6m em Grupos
+# Regra: Otimização Linear de Barras de 6m em Dois Cenários (Material vs Tempo)
 
-**Contexto:** Organiza as barras calculadas por `./backend/app/cutting_engine.py` para corte em barras padrão de 6 m (6000 mm, configurável), agrupando perfis compatíveis e separando o plano em dois grupos operacionais.
+**Contexto:** Organiza 100% das peças viáveis calculadas por `./backend/app/cutting_engine.py` para corte em barras padrão de 6 m (6000 mm, configurável), agrupando perfis físicos compatíveis e calculando **em paralelo dois cenários completos**: aproveitamento máximo de material e otimização do tempo de execução. A divisão artificial anterior em Grupo 1 (`<= perda_maxima`) e Grupo 2 e o parâmetro `Perda Máxima (cm)` foram removidos.
 
 ## Regra de Agrupamento (`resolve_profile_group`)
 
@@ -15,34 +15,43 @@ tags: [regras-negocio, otimizacao, barras-6m, cutting-stock, portas]
 2. **Prioridade 2 — Fallback `Modelo — Tipo`:** Quando o código do perfil não está preenchido, agrupa por `<MODELO> — Lateral` ou `<MODELO> — Puxador`.
 3. **Acabamento:** Por padrão, otimiza em barra bruta (unificado). O parâmetro `separar_por_acabamento` permite segmentar adicionalmente por acabamento do perfil.
 
-## Separação em Dois Grupos
+## Dois Cenários Paralelos (`build_bar_optimization`)
 
-- **Grupo 1 — Organizados na Barra de 6m (`barras_fechadas` / `barras_otimizadas_flat`):**
-  - Combinações cuja sobra final seja menor ou igual à perda máxima configurável (`perda_maxima_mm`, padrão `200 mm` = `20 cm`).
-  - Peças dentro de cada barra ordenadas do maior para o menor comprimento.
-- **Grupo 2 — Peças Restantes (Maior → Menor) e Otimização em Menor Nº de Barras (`nao_alocados` / `barras_grupo2` / `barras_grupo2_flat`):**
-  - Mantém integralmente a listagem ordenada estritamente **do maior para o menor** (`medida_corte_mm` decrescente) das peças que não fecharam barra no Grupo 1 ou excederam a barra útil.
-  - Otimiza todas as peças viáveis (`<= comprimento_barra_mm - desponte_mm`) no menor número possível de barras de 6 m (`_pack_min_bars`), combinando BFD/FFD/Preenchimento Exato, redução 3-para-2 (`_reduce_bins_3_to_2`) e concentração de sobra (`_concentrate_scrap`).
+Todas as peças com `medida_corte_mm <= comprimento_barra_mm - desponte_mm` entram nos dois cenários; peças maiores são isoladas em `pecas_inviaveis_flat`:
 
-## KPIs Calculados por Grupo e Consolidado
+- **Cenário 1 — Aproveitamento de Material (`cenarios.material`, via `_build_material_group`):**
+  - Empacotamento global no menor número de barras possível (`_pack_min_bars`): portfólio BFD (`_bin_pack_bfd`), FFD (`_bin_pack_ffd`) e Preenchimento Exato (`_bin_pack_exact_fill` com `_find_bar_patterns`), seguido de redução exata 3-para-2 (`_reduce_bins_3_to_2`) e concentração de retalho na última barra (`_concentrate_scrap`).
+  - **Encadeamento inteligente de medidas e ângulos (`_assign_and_order_material_bars` + `_order_pieces_by_angle`):** ordena a sequência de barras e orienta peças assimétricas (`45° / 90°` ↔ `90° / 45°`) para casar medida e ângulo entre peças e barras consecutivas, reduzindo trocas de batente e giros de serra sem alterar o consumo de barras.
+- **Cenário 2 — Tempo de Execução (`cenarios.tempo_execucao`, via `_build_tempo_execucao_group`):**
+  - Agrupa cortes idênticos em lote estritamente **da maior para a menor medida**, ordenando/orientando ângulos dentro do passo (`_order_pieces_by_angle`) e alocando via First-Fit Decreasing (FFD) que reaproveita sobras de barras já semi-cortadas.
+  - Produz `roteiro_medidas` (e `roteiro_flat` consolidado) diferenciando explicitamente `"Barra nova"` vs `"Sobra da Barra #N"` com `sobra_antes_mm`, `sobra_depois_mm`, `angulos_corte`, `troca_angulo` e `trocas_angulo_passo`.
 
-- **Grupo 1:** `total_barras_6m`, `aproveitamento_medio_pct` (% médio por barra), `total_perda_mm`, `total_perda_metros` e `perda_media_barra_grupo1_mm`.
-- **Grupo 2 Otimizado:** `total_barras_grupo2`, `aproveitamento_medio_grupo2_pct` (% médio por barra), `total_perda_grupo2_mm`, `total_perda_grupo2_metros`, `perda_media_barra_grupo2_mm` e `total_pecas_inviaveis`.
-- **Geral Consolidado (Grupo 1 + Grupo 2):** `total_barras_geral`, `aproveitamento_medio_geral_pct` (% médio por barra), `total_perda_geral_mm`, `total_perda_geral_metros` e `perda_media_barra_geral_mm`.
+## Ângulos de Corte (`45°` / `90°`), Trocas de Ângulo e Perfil Simétrico (`//` vs `\/`)
+
+- **Orientação automática de peças mistas (`_orient_piece_for_angle`):** peças com pontas diferentes (`45° / 90°`) são automaticamente invertidas (`45°/90° → 90°/45° → 45°/90°`) para entrar no mesmo ângulo do corte anterior.
+- **Contagem de trocas de ângulo (`total_trocas_angulo` / `trocas_angulo_barra`):** soma transições entre peças consecutivas (`prev_angle != a_esq`) e mudanças internas em peças mistas (`a_esq != a_dir`).
+- **Perfil Simétrico (`//` com giro de 180°) vs Assimétrico (`\/` sem giro):**
+  - Quando duas peças adjacentes em 45° possuem `perfil_simetrico=True` (`perfil_simetrico_lateral` / `perfil_simetrico_puxador`), `_apply_bar_nesting` alterna `invertida` (`False, True, False, ...`), marca `juncao_entrada = "//"` e contabiliza `economia_chanfro_mm` em cada junção usando `_calc_pair_overlap_um`: `ov_um = min(w_prev, w_curr, c_prev // 2, c_curr // 2)` (se `largura_perfil_mm == 0.0`, alterna e marca `"//"` com economia `0.0 mm`).
+  - Quando `perfil_simetrico=False`, as peças não podem girar (`invertida=False`), mantêm corte em V `juncao_entrada = "\/"` com economia `0.0 mm` (demais transições recebem `""` na 1ª peça, `"||"` em `90°+90°` e `"45↔90"` nas mistas).
+  - **Impacto no empacotamento e consumo:** no Cenário 1 (`_build_material_group`), grupos homogêneos `45°/45°` simétricos com `W > 0` empacotam usando `pack_w_um = c_um + K_um - W` e `pack_cap_um = usable_um + K_um - W` (`_pack_min_bars` respeitando `sum(c) + (N-1)*K - (N-1)*W <= usable`), enquanto grupos heterogêneos usam o envelope conservador; no Cenário 2 (`_build_tempo_execucao_group`), o FFD consulta `_calc_pair_overlap_um(bar_state["pieces"][-1], p)` a cada encaixe em barra semi-cortada (`consumido_util_um += c_um + K_um - ov_um`).
+  - `_build_bar_dict` apura `material_util_um = max(0, soma_pecas_um - econ_um)`, `consumido_um = D_um + material_util_um + kerfs_um`, `aproveitamento_pct`, `perfil_simetrico`, `modo_juncao_45` (`"// (Girar)"` vs `"\/ (Sem giro)"`), `economia_chanfro_mm`, `cortes_paralelos_qtd` e `cortes_v_qtd`.
+
+## KPIs, Ajustes no Corte e Comparativo
+
+- **Ajustes no Corte (`ajustes_corte` / `total_ajustes_corte`):** contabiliza **estritamente trocas consecutivas de medida** (`medida[i] != medida[i-1]`, via `_annotate_and_count_adjustments`), sem incluir a regulagem inicial do primeiro corte (logo, peças todas iguais resultam em `0` ajustes; no Cenário 2 equivale a `max(0, medidas_distintas - 1)`).
+- **Resumo por cenário (`resumo`) e grupo:** `total_grupos`, `total_pecas_entrada`, `total_pecas_alocadas`, `total_pecas_inviaveis`, `total_barras`, `total_metros_pecas`, `aproveitamento_medio_pct` (% médio por barra via `_calc_avg_yield_and_loss`), `total_perda_mm`, `total_perda_metros`, `perda_media_barra_mm`, `total_ajustes_corte`, `total_trocas_angulo`, `total_economia_chanfro_mm`, `total_cortes_paralelos` e `total_cortes_v`.
+- **Comparativo direto (`comparativo`):** expõe `diferenca_barras_tempo_vs_material`, `diferenca_perda_mm_tempo_vs_material`, `diferenca_perda_metros_tempo_vs_material`, `reducao_ajustes_tempo_vs_material`, `reducao_ajustes_pct`, `reducao_trocas_angulo_tempo_vs_material` e `diferenca_economia_chanfro_mm_tempo_vs_material`.
 
 ## Parâmetros Configuráveis (`OptimizationConfig`)
 
 - `comprimento_barra_mm` (padrão `6000.0` mm / 6 m)
-- `perda_maxima_mm` (padrão `200.0` mm / 20 cm)
 - `espessura_serra_mm` (kerf descontado entre cortes, padrão `0.0` mm)
 - `desponte_mm` (perda fixa nas pontas, padrão `0.0` mm)
 - `separar_por_acabamento` (padrão `False`)
 
-## Motor Híbrido em Micrômetros
+## Motor em Micrômetros
 
-- Converte medidas para micrômetros inteiros (`SCALE_UM = 1000`) evitando desvios de ponto flutuante em medidas decimais (ex.: `833.333 mm`).
-- Estágio 1: Portfólio de 3 heurísticas com branch-and-bound exato por barra (`tightest`, `conserve_small`, `BFD seeded`).
-- Estágio 2: Refinamento por trocas `1-por-1` e `1-por-2`, backtracking multi-barras com orçamento limitado e polimento final de perda, garantindo invariante estrito de conservação de peças.
+- Converte medidas para micrômetros inteiros (`SCALE_UM = 1000`, `_to_um`, `_from_um`) evitando desvios de ponto flutuante em medidas decimais (ex.: `833.333 mm`), mantendo invariante estrito de conservação de peças nos dois cenários e no roteiro.
 
 ## Dependências (Grafo)
 

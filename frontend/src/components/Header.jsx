@@ -64,6 +64,15 @@ export default function Header({
   ];
 
   const datas = (meta?.datas_abertura || []).join(", ");
+  const consultasCount = meta?.consultas?.length || 0;
+  const subtitleParts = ["Consulta carregada"];
+  if (consultasCount > 1) {
+    subtitleParts.push(`${consultasCount} arquivos/lotes`);
+  }
+  if (datas) {
+    subtitleParts.push(`Abertura ${datas}`);
+  }
+  subtitleParts.push(`${meta?.total_linhas ?? 0} registro(s)`);
 
   return (
     <header className="sticky top-0 z-30 bg-lider-surface/95 backdrop-blur-sm border-b border-lider-border">
@@ -119,8 +128,8 @@ export default function Header({
               </span>
             </div>
             <p className="text-xs text-lider-slate mt-0.5 leading-snug">
-              {hasData && datas
-                ? `Consulta carregada · Abertura ${datas} · ${meta?.total_linhas ?? 0} registro(s)`
+              {hasData
+                ? subtitleParts.join(" · ")
                 : "Medidas, Modelos, Puxadores, Divisórias, Perfis de Alumínio e Vidros"}
             </p>
           </div>

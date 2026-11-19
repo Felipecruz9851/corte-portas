@@ -17,11 +17,13 @@ from pydantic import BaseModel, Field
 from app.bar_optimizer import OptimizationConfig, build_bar_optimization
 from app.cutting_engine import (
     CuttingRule,
+    _norm_angle,
     build_cutting_plan,
     build_glass_cutting_plan,
     compute_item_cuts,
     compute_item_glasses,
     compute_kpis,
+    default_angles_for_tipo_corte,
     load_rules,
     save_rules,
 )
@@ -82,15 +84,26 @@ class ERPExtractRequest(BaseModel):
     senha: Optional[str] = None
 
 
-class HTMLExtractRequest(BaseModel):
-    html: str = Field(..., min_length=10)
+class HTMLFileItem(BaseModel):
+    html: str = ""
     source_name: str = "HTML enviado"
+
+
+class HTMLExtractRequest(BaseModel):
+    html: Optional[str] = None
+    source_name: str = "HTML enviado"
+    files: Optional[List[HTMLFileItem]] = None
 
 
 class RuleUpdateModel(BaseModel):
     modelo: str
     descricao: str = ""
     tipo_corte: str = "45°"
+    angulo_corte_quadro: Optional[int] = None
+    angulo_corte_puxador: Optional[int] = None
+    angulo_corte_divisoria: Optional[int] = None
+    perfil_simetrico_lateral: bool = False
+    perfil_simetrico_puxador: bool = False
     codigo_perfil_lateral: str = ""
     codigo_perfil_puxador: str = ""
     largura_perfil_quadro_mm: float = 0.0
@@ -110,15 +123,15 @@ class RulesBatchUpdate(BaseModel):
 
 class OptimizeBarsRequest(BaseModel):
     comprimento_barra_mm: float = Field(default=6000.0, gt=0)
-    perda_maxima_mm: float = Field(default=200.0, ge=0)
     espessura_serra_mm: float = Field(default=0.0, ge=0)
     desponte_mm: float = Field(default=0.0, ge=0)
     separar_por_acabamento: bool = False
+    perda_maxima_mm: Optional[float] = Field(default=None, ge=0)
     detailed_bars: Optional[List[Dict[str, Any]]] = None
 
 
 class ExportRequest(BaseModel):
-    mode: str = "items"  # para CSV: 'items', 'corte', 'vidro', 'otimizacao_barras', 'otimizacao_grupo2' ou 'otimizacao_sobras'
+    mode: str = "items"  # para CSV: 'items', 'corte', 'vidro', 'otimizacao_material', 'otimizacao_tempo_roteiro' ou 'otimizacao_tempo_barras'
     items: Optional[List[Dict[str, Any]]] = None
     detailed_bars: Optional[List[Dict[str, Any]]] = None
     grouped_bars: Optional[List[Dict[str, Any]]] = None
@@ -266,7 +279,36 @@ def extract_from_erp(req: ERPExtractRequest) -> Dict[str, Any]:
 
 @app.post("/api/extract/html")
 def extract_from_html(req: HTMLExtractRequest) -> Dict[str, Any]:
-    return _run_pipeline_from_html_list([(req.source_name, req.html)])
+    html_pages: List[tuple[str, str]] = []
+
+    if req.files is not None:
+        if len(req.files) == 0:
+            raise HTTPException(400, "Envie ao menos um arquivo HTML válido.")
+        for idx, item in enumerate(req.files):
+            label = (item.source_name or "").strip() or f"HTML {idx + 1}"
+            if not item.html or len(item.html.strip()) < 10:
+                raise HTTPException(
+                    400,
+                    f"O arquivo '{label}' está vazio ou não contém HTML válido.",
+                )
+            html_pages.append((label, item.html))
+    elif req.html is not None:
+        if len(req.html.strip()) < 10:
+            raise HTTPException(400, "O conteúdo HTML enviado está vazio ou é inválido.")
+        label = (req.source_name or "").strip() or "HTML enviado"
+        html_pages.append((label, req.html))
+    else:
+        raise HTTPException(400, "Envie ao menos um arquivo HTML válido.")
+
+    return _run_pipeline_from_html_list(html_pages)
+
+
+@app.post("/api/session/clear")
+def clear_session() -> Dict[str, str]:
+    STORE.meta = {}
+    STORE.extracted_items = []
+    STORE.payload = None
+    return {"status": "cleared"}
 
 
 @app.get("/api/rules")
@@ -279,7 +321,14 @@ def get_rules() -> Dict[str, Any]:
 def update_rules(req: RulesBatchUpdate) -> Dict[str, Any]:
     rules = load_rules()
     for key, model_rule in req.rules.items():
-        rules[key] = CuttingRule(**model_rule.model_dump())
+        data = model_rule.model_dump()
+        q_def, p_def, d_def = default_angles_for_tipo_corte(data.get("tipo_corte", ""))
+        data["angulo_corte_quadro"] = _norm_angle(data.get("angulo_corte_quadro"), q_def)
+        data["angulo_corte_puxador"] = _norm_angle(data.get("angulo_corte_puxador"), p_def)
+        data["angulo_corte_divisoria"] = _norm_angle(data.get("angulo_corte_divisoria"), d_def)
+        data["perfil_simetrico_lateral"] = bool(data.get("perfil_simetrico_lateral", False))
+        data["perfil_simetrico_puxador"] = bool(data.get("perfil_simetrico_puxador", False))
+        rules[key] = CuttingRule(**data)
     save_rules(rules)
 
     recalculated = None
@@ -327,7 +376,6 @@ def optimize_bars(req: OptimizeBarsRequest) -> Dict[str, Any]:
 
     config = OptimizationConfig(
         comprimento_barra_mm=req.comprimento_barra_mm,
-        perda_maxima_mm=req.perda_maxima_mm,
         espessura_serra_mm=req.espessura_serra_mm,
         desponte_mm=req.desponte_mm,
         separar_por_acabamento=req.separar_por_acabamento,
@@ -360,6 +408,17 @@ def _resolve_export_data(req: Optional[ExportRequest]) -> Dict[str, Any]:
             "vidro_agrupado": req.grouped_glasses or [],
             "otimizacao_barras": req.bar_optimization or {},
         }
+    if req and req.bar_optimization is not None:
+        base = dict(STORE.payload or {})
+        base.setdefault("items", [])
+        base.setdefault("corte_detalhado", [])
+        base.setdefault("corte_agrupado", [])
+        base.setdefault("vidro_detalhado", [])
+        base.setdefault("vidro_agrupado", [])
+        base.setdefault("meta", {})
+        base.setdefault("kpis", {})
+        base["otimizacao_barras"] = req.bar_optimization
+        return base
     if STORE.payload:
         return STORE.payload
     raise HTTPException(
@@ -401,12 +460,12 @@ def export_csv(req: Optional[ExportRequest] = None) -> Response:
         filename = "corte_serra_portas.csv"
     elif mode == "vidro":
         filename = "corte_vidros_portas.csv"
-    elif mode == "otimizacao_barras":
-        filename = "otimizacao_barras_6m.csv"
-    elif mode == "otimizacao_grupo2":
-        filename = "otimizacao_grupo2_barras_6m.csv"
-    elif mode == "otimizacao_sobras":
-        filename = "otimizacao_nao_alocados.csv"
+    elif mode in ("otimizacao_material", "otimizacao_barras"):
+        filename = "otimizacao_material_6m.csv"
+    elif mode == "otimizacao_tempo_roteiro":
+        filename = "otimizacao_tempo_roteiro_6m.csv"
+    elif mode in ("otimizacao_tempo_barras", "otimizacao_tempo"):
+        filename = "otimizacao_tempo_barras_6m.csv"
     else:
         filename = "itens_portas.csv"
     return Response(

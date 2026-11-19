@@ -32,6 +32,8 @@ graph TD
 - [[01-Frontend-UI/Interface-Web-Corte-Portas]]
 - [[02-Backend-API/API-Extracao-ERP-Portas]]
 - [[03-Dominio-Calculos/Regras-Extracao-e-Corte-Perfis]]
+- [[03-Dominio-Calculos/Guia-Completo-Regras-e-Manutencao]]
+- [[03-Dominio-Calculos/Catalogo-Modelos-e-Particularidades]]
 - [[03-Dominio-Calculos/Otimizacao-Barras-6m]]
 - [[04-Infra-Dados/Integracao-HTTP-ERP]]
 - [[05-Automacoes/Inicializacao-Servidor-Local]]

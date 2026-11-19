@@ -59,11 +59,17 @@ def _flatten_items_for_table(items: List[Dict[str, Any]]) -> List[Dict[str, Any]
     return rows
 
 
-def _flatten_optimized_bars_for_table(
+def _flatten_scenario_bars(
     bar_opt: Optional[Dict[str, Any]],
-    key: str = "barras_otimizadas_flat",
+    scenario_id: str,
 ) -> List[Dict[str, Any]]:
-    barras = (bar_opt or {}).get(key) or []
+    barras = (
+        (bar_opt or {})
+        .get("cenarios", {})
+        .get(scenario_id, {})
+        .get("barras_flat")
+        or []
+    )
     rows: List[Dict[str, Any]] = []
     for b in barras:
         rows.append(
@@ -80,33 +86,100 @@ def _flatten_optimized_bars_for_table(
                 "Perda_mm": b.get("perda_mm"),
                 "Perda_cm": b.get("perda_cm"),
                 "Aproveitamento_pct": b.get("aproveitamento_pct"),
-                "Padrao_Corte": b.get("padrao_corte"),
+                "Troca_Entrada": "Sim" if b.get("troca_entrada") else "Não",
+                "Ajustes_Internos": b.get("ajustes_internos", 0),
+                "Ajustes_Barra": b.get("ajustes_barra", 0),
+                "Angulos_Barra": b.get("angulos_resumo") or "",
+                "Trocas_Angulo_Barra": b.get("trocas_angulo_barra", 0),
+                "Perfil_Simetrico": "Sim (//)" if b.get("perfil_simetrico") else "Não (\\/)",
+                "Cortes_Paralelos": b.get("cortes_paralelos_qtd", 0),
+                "Cortes_V": b.get("cortes_v_qtd", 0),
+                "Economia_Chanfro_mm": b.get("economia_chanfro_mm", 0.0),
+                "Sequencia_Corte": b.get("sequencia_corte") or b.get("padrao_corte"),
                 "OPs": b.get("ops"),
             }
         )
     return rows
 
 
-def _flatten_unplaced_for_table(
+def _flatten_tempo_roteiro(
     bar_opt: Optional[Dict[str, Any]],
 ) -> List[Dict[str, Any]]:
-    unplaced = (bar_opt or {}).get("nao_alocados_agrupados_flat") or []
+    steps = (
+        (bar_opt or {})
+        .get("cenarios", {})
+        .get("tempo_execucao", {})
+        .get("roteiro_flat")
+        or []
+    )
     rows: List[Dict[str, Any]] = []
-    for p in unplaced:
+    for step in steps:
+        for alloc in step.get("alocacoes") or []:
+            alloc_pcs = alloc.get("pecas") or []
+            alloc_sim = bool(alloc_pcs) and all(
+                bool(p.get("perfil_simetrico")) for p in alloc_pcs
+            )
+            rows.append(
+                {
+                    "Grupo": step.get("grupo_nome"),
+                    "Codigo_Perfil": step.get("codigo_perfil") or "",
+                    "Perfil_Simetrico": "Sim (//)" if alloc_sim else "Não (\\/)",
+                    "Passo": step.get("passo"),
+                    "Troca_Medida": "Sim" if step.get("troca_medida") else "Não",
+                    "Troca_Angulo": "Sim" if step.get("troca_angulo") else "Não",
+                    "Trocas_Angulo_Passo": step.get("trocas_angulo_passo", 0),
+                    "Medida_Corte_mm": step.get("medida_corte_mm"),
+                    "Angulos_Corte": alloc.get("angulos_corte") or step.get("angulos_corte") or "",
+                    "Origem_Barra": alloc.get("origem_barra"),
+                    "Barra_Grupo": alloc.get("barra_numero"),
+                    "Barra_Global": alloc.get("barra_global_numero"),
+                    "Qtd_Cortes": alloc.get("qtd_cortes"),
+                    "Sobra_Antes_mm": alloc.get("sobra_antes_mm"),
+                    "Sobra_Depois_mm": alloc.get("sobra_depois_mm"),
+                    "OPs": alloc.get("ops"),
+                }
+            )
+    return rows
+
+
+def _flatten_scenario_comparison(
+    bar_opt: Optional[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    cenarios = (bar_opt or {}).get("cenarios") or {}
+    mat_groups = cenarios.get("material", {}).get("grupos") or []
+    tmp_groups_by_key = {
+        g["grupo_key"]: g for g in (cenarios.get("tempo_execucao", {}).get("grupos") or [])
+    }
+    rows: List[Dict[str, Any]] = []
+    for gm in mat_groups:
+        gt = tmp_groups_by_key.get(gm["grupo_key"], {})
+        mat_bars = gm.get("qtd_barras", 0)
+        tmp_bars = gt.get("qtd_barras", 0)
+        mat_adj = gm.get("ajustes_corte", 0)
+        tmp_adj = gt.get("ajustes_corte", 0)
+        mat_ang = gm.get("trocas_angulo", 0)
+        tmp_ang = gt.get("trocas_angulo", 0)
         rows.append(
             {
-                "Grupo": p.get("grupo_nome"),
-                "Codigo_Perfil": p.get("codigo_perfil") or "",
-                "Modelo": p.get("modelo"),
-                "Tipo_Perfil": p.get("tipo_perfil"),
-                "Acabamento_Perfil": p.get("acabamento_perfil"),
-                "Funcao_Barra": p.get("funcao_barra"),
-                "Tipo_Corte": p.get("tipo_corte"),
-                "Medida_Corte_mm": p.get("medida_corte_mm"),
-                "Qtd_Pecas": p.get("qtd_pecas"),
-                "Total_Metros": p.get("total_metros"),
-                "Motivo": p.get("motivo"),
-                "OPs": p.get("ops"),
+                "Grupo": gm.get("grupo_nome"),
+                "Origem_Agrupamento": gm.get("origem_agrupamento"),
+                "Codigo_Perfil": gm.get("codigo_perfil") or "",
+                "Qtd_Pecas": gm.get("total_pecas_alocadas", 0),
+                "Material_Barras": mat_bars,
+                "Material_Aproveitamento_pct": gm.get("aproveitamento_medio_pct", 0.0),
+                "Material_Perda_mm": gm.get("total_perda_mm", 0.0),
+                "Material_Ajustes": mat_adj,
+                "Material_Trocas_Angulo": mat_ang,
+                "Material_Economia_Chanfro_mm": gm.get("economia_chanfro_mm", 0.0),
+                "Tempo_Barras": tmp_bars,
+                "Tempo_Aproveitamento_pct": gt.get("aproveitamento_medio_pct", 0.0),
+                "Tempo_Perda_mm": gt.get("total_perda_mm", 0.0),
+                "Tempo_Ajustes": tmp_adj,
+                "Tempo_Trocas_Angulo": tmp_ang,
+                "Tempo_Economia_Chanfro_mm": gt.get("economia_chanfro_mm", 0.0),
+                "Diff_Barras": tmp_bars - mat_bars,
+                "Reducao_Ajustes": mat_adj - tmp_adj,
+                "Reducao_Trocas_Angulo": mat_ang - tmp_ang,
             }
         )
     return rows
@@ -126,13 +199,10 @@ def export_to_xlsx_bytes(
     df_grouped = pd.DataFrame(grouped_bars)
     df_glass_det = pd.DataFrame(detailed_glasses or [])
     df_glass_grp = pd.DataFrame(grouped_glasses or [])
-    df_opt_bars = pd.DataFrame(
-        _flatten_optimized_bars_for_table(bar_optimization, "barras_otimizadas_flat")
-    )
-    df_opt_g2_bars = pd.DataFrame(
-        _flatten_optimized_bars_for_table(bar_optimization, "barras_grupo2_flat")
-    )
-    df_opt_unplaced = pd.DataFrame(_flatten_unplaced_for_table(bar_optimization))
+    df_opt_mat = pd.DataFrame(_flatten_scenario_bars(bar_optimization, "material"))
+    df_opt_rot = pd.DataFrame(_flatten_tempo_roteiro(bar_optimization))
+    df_opt_tmp = pd.DataFrame(_flatten_scenario_bars(bar_optimization, "tempo_execucao"))
+    df_opt_cmp = pd.DataFrame(_flatten_scenario_comparison(bar_optimization))
 
     buffer = io.BytesIO()
     with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
@@ -141,13 +211,10 @@ def export_to_xlsx_bytes(
         df_grouped.to_excel(writer, sheet_name="Resumo_Corte_Serra", index=False)
         df_glass_det.to_excel(writer, sheet_name="Lista_Corte_Vidros", index=False)
         df_glass_grp.to_excel(writer, sheet_name="Resumo_Corte_Vidros", index=False)
-        df_opt_bars.to_excel(writer, sheet_name="Otimizacao_Barras_6m", index=False)
-        df_opt_g2_bars.to_excel(
-            writer, sheet_name="Otimizacao_Grupo2_Barras", index=False
-        )
-        df_opt_unplaced.to_excel(
-            writer, sheet_name="Otimizacao_Nao_Alocados", index=False
-        )
+        df_opt_mat.to_excel(writer, sheet_name="Otimizacao_Material", index=False)
+        df_opt_rot.to_excel(writer, sheet_name="Otimizacao_Tempo_Roteiro", index=False)
+        df_opt_tmp.to_excel(writer, sheet_name="Otimizacao_Tempo_Barras", index=False)
+        df_opt_cmp.to_excel(writer, sheet_name="Otimizacao_Comparativo", index=False)
 
         wb = writer.book
         header_fill = PatternFill(
@@ -184,21 +251,17 @@ def export_to_csv_bytes(
     bar_optimization: Optional[Dict[str, Any]] = None,
     mode: str = "items",
 ) -> bytes:
-    """Exporta itens, resumo de corte, vidros ou otimização em CSV (; UTF-8 BOM)."""
+    """Exporta itens, resumo de corte, vidros ou cenários de otimização em CSV (; UTF-8 BOM)."""
     if mode == "corte":
         df = pd.DataFrame(grouped_bars)
     elif mode == "vidro":
         df = pd.DataFrame(grouped_glasses or [])
-    elif mode == "otimizacao_barras":
-        df = pd.DataFrame(
-            _flatten_optimized_bars_for_table(bar_optimization, "barras_otimizadas_flat")
-        )
-    elif mode == "otimizacao_grupo2":
-        df = pd.DataFrame(
-            _flatten_optimized_bars_for_table(bar_optimization, "barras_grupo2_flat")
-        )
-    elif mode == "otimizacao_sobras":
-        df = pd.DataFrame(_flatten_unplaced_for_table(bar_optimization))
+    elif mode in ("otimizacao_material", "otimizacao_barras"):
+        df = pd.DataFrame(_flatten_scenario_bars(bar_optimization, "material"))
+    elif mode == "otimizacao_tempo_roteiro":
+        df = pd.DataFrame(_flatten_tempo_roteiro(bar_optimization))
+    elif mode in ("otimizacao_tempo_barras", "otimizacao_tempo"):
+        df = pd.DataFrame(_flatten_scenario_bars(bar_optimization, "tempo_execucao"))
     else:
         df = pd.DataFrame(_flatten_items_for_table(items))
 
