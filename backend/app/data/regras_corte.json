@@ -142,7 +142,7 @@
     "angulo_corte_quadro": 45,
     "angulo_corte_puxador": 45,
     "angulo_corte_divisoria": 90,
-    "perfil_simetrico_lateral": false,
+    "perfil_simetrico_lateral": true,
     "perfil_simetrico_puxador": false,
     "observacao": "Inclui Risk Usinado, Inclinado e Sem Usinagem"
   },
