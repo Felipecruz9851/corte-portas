@@ -22,6 +22,7 @@ export default function BarsCutTab({ groupedBars = [], detailedBars = [], items 
           r.op,
           r.codigo,
           r.modelo,
+          r.codigo_perfil,
           r.acabamento_perfil,
           r.funcao_barra,
           r.ops,
@@ -199,6 +200,7 @@ export default function BarsCutTab({ groupedBars = [], detailedBars = [], items 
                 <thead>
                   <tr>
                     <th>Modelo</th>
+                    <th>Cód. Perfil</th>
                     <th>Acabamento Perfil</th>
                     <th>Função da Barra</th>
                     <th>Orientação</th>
@@ -212,12 +214,21 @@ export default function BarsCutTab({ groupedBars = [], detailedBars = [], items 
                 </thead>
                 <tbody>
                   {rows.map((r, idx) => (
-                    <tr key={`${r.modelo}-${r.funcao_barra}-${r.medida_corte_mm}-${idx}`}>
+                    <tr key={`${r.modelo}-${r.codigo_perfil || ""}-${r.funcao_barra}-${r.medida_corte_mm}-${idx}`}>
                       <th scope="row" data-label="Modelo">
                         <span className="inline-flex items-center px-2 py-0.5 text-[11px] font-medium border border-lider-border bg-lider-canvas text-lider-charcoal rounded-[2px]">
                           {r.modelo}
                         </span>
                       </th>
+                      <td data-label="Cód. Perfil">
+                        {r.codigo_perfil ? (
+                          <code className="inline-flex items-center px-1.5 py-0.5 font-mono text-[11px] border border-lider-wood/40 bg-lider-wood/5 text-lider-wood rounded-[2px]">
+                            {r.codigo_perfil}
+                          </code>
+                        ) : (
+                          <span className="text-lider-muted">-</span>
+                        )}
+                      </td>
                       <td data-label="Acabamento Perfil">{r.acabamento_perfil}</td>
                       <td data-label="Função da Barra">{r.funcao_barra}</td>
                       <td data-label="Orientação">{r.orientacao}</td>
@@ -255,6 +266,7 @@ export default function BarsCutTab({ groupedBars = [], detailedBars = [], items 
                     <th>Código</th>
                     <th>Entrega</th>
                     <th>Modelo</th>
+                    <th>Cód. Perfil</th>
                     <th>Acabamento</th>
                     <th>Função da Barra</th>
                     <th className="num-header">Qtd</th>
@@ -280,6 +292,15 @@ export default function BarsCutTab({ groupedBars = [], detailedBars = [], items 
                         <span className="inline-flex items-center px-2 py-0.5 text-[11px] font-medium border border-lider-border bg-lider-canvas text-lider-charcoal rounded-[2px]">
                           {r.modelo}
                         </span>
+                      </td>
+                      <td data-label="Cód. Perfil">
+                        {r.codigo_perfil ? (
+                          <code className="inline-flex items-center px-1.5 py-0.5 font-mono text-[11px] border border-lider-wood/40 bg-lider-wood/5 text-lider-wood rounded-[2px]">
+                            {r.codigo_perfil}
+                          </code>
+                        ) : (
+                          <span className="text-lider-muted">-</span>
+                        )}
                       </td>
                       <td data-label="Acabamento">{r.acabamento_perfil}</td>
                       <td data-label="Função da Barra">{r.funcao_barra}</td>

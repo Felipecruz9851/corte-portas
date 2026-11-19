@@ -14,6 +14,7 @@ from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
+from app.bar_optimizer import OptimizationConfig, build_bar_optimization
 from app.cutting_engine import (
     CuttingRule,
     build_cutting_plan,
@@ -64,6 +65,7 @@ class ExtractionStore:
         self.meta: Dict[str, Any] = {}
         self.extracted_items: List[ExtractedItem] = []
         self.payload: Optional[Dict[str, Any]] = None
+        self.optimization_config: OptimizationConfig = OptimizationConfig()
 
 
 STORE = ExtractionStore()
@@ -89,6 +91,8 @@ class RuleUpdateModel(BaseModel):
     modelo: str
     descricao: str = ""
     tipo_corte: str = "45°"
+    codigo_perfil_lateral: str = ""
+    codigo_perfil_puxador: str = ""
     largura_perfil_quadro_mm: float = 0.0
     largura_perfil_puxador_mm: float = 0.0
     desconto_adjacente_puxador_mm: float = 0.0
@@ -104,13 +108,23 @@ class RulesBatchUpdate(BaseModel):
     rules: Dict[str, RuleUpdateModel]
 
 
+class OptimizeBarsRequest(BaseModel):
+    comprimento_barra_mm: float = Field(default=6000.0, gt=0)
+    perda_maxima_mm: float = Field(default=200.0, ge=0)
+    espessura_serra_mm: float = Field(default=0.0, ge=0)
+    desponte_mm: float = Field(default=0.0, ge=0)
+    separar_por_acabamento: bool = False
+    detailed_bars: Optional[List[Dict[str, Any]]] = None
+
+
 class ExportRequest(BaseModel):
-    mode: str = "items"  # para CSV: 'items', 'corte' ou 'vidro'
+    mode: str = "items"  # para CSV: 'items', 'corte', 'vidro', 'otimizacao_barras', 'otimizacao_grupo2' ou 'otimizacao_sobras'
     items: Optional[List[Dict[str, Any]]] = None
     detailed_bars: Optional[List[Dict[str, Any]]] = None
     grouped_bars: Optional[List[Dict[str, Any]]] = None
     detailed_glasses: Optional[List[Dict[str, Any]]] = None
     grouped_glasses: Optional[List[Dict[str, Any]]] = None
+    bar_optimization: Optional[Dict[str, Any]] = None
     meta: Optional[Dict[str, Any]] = None
     kpis: Optional[Dict[str, Any]] = None
 
@@ -140,6 +154,9 @@ def _build_response_payload(
 ) -> Dict[str, Any]:
     detailed_bars, grouped_bars = build_cutting_plan(all_items, rules)
     detailed_glasses, grouped_glasses = build_glass_cutting_plan(all_items, rules)
+    bar_optimization = build_bar_optimization(
+        detailed_bars, STORE.optimization_config, rules
+    )
     kpis = compute_kpis(all_items, detailed_bars, detailed_glasses)
 
     items_dicts: List[Dict[str, Any]] = []
@@ -171,6 +188,7 @@ def _build_response_payload(
         "corte_agrupado": grouped_bars,
         "vidro_detalhado": detailed_glasses,
         "vidro_agrupado": grouped_glasses,
+        "otimizacao_barras": bar_optimization,
         "rules": {k: v.to_dict() for k, v in rules.items()},
     }
 
@@ -300,6 +318,36 @@ def reset_rules() -> Dict[str, Any]:
     }
 
 
+@app.post("/api/optimize/bars")
+def optimize_bars(req: OptimizeBarsRequest) -> Dict[str, Any]:
+    if req.desponte_mm >= req.comprimento_barra_mm:
+        raise HTTPException(
+            400, "O desponte deve ser menor que o comprimento da barra."
+        )
+
+    config = OptimizationConfig(
+        comprimento_barra_mm=req.comprimento_barra_mm,
+        perda_maxima_mm=req.perda_maxima_mm,
+        espessura_serra_mm=req.espessura_serra_mm,
+        desponte_mm=req.desponte_mm,
+        separar_por_acabamento=req.separar_por_acabamento,
+    )
+    STORE.optimization_config = config
+
+    source_bars = (
+        req.detailed_bars
+        if req.detailed_bars is not None
+        else (STORE.payload.get("corte_detalhado", []) if STORE.payload else [])
+    )
+    rules = load_rules()
+    result = build_bar_optimization(source_bars, config, rules)
+
+    if STORE.payload and req.detailed_bars is None:
+        STORE.payload["otimizacao_barras"] = result
+
+    return result
+
+
 def _resolve_export_data(req: Optional[ExportRequest]) -> Dict[str, Any]:
     if req and req.items is not None:
         return {
@@ -310,6 +358,7 @@ def _resolve_export_data(req: Optional[ExportRequest]) -> Dict[str, Any]:
             "corte_agrupado": req.grouped_bars or [],
             "vidro_detalhado": req.detailed_glasses or [],
             "vidro_agrupado": req.grouped_glasses or [],
+            "otimizacao_barras": req.bar_optimization or {},
         }
     if STORE.payload:
         return STORE.payload
@@ -328,6 +377,7 @@ def export_xlsx(req: Optional[ExportRequest] = None) -> Response:
         data["corte_agrupado"],
         data.get("vidro_detalhado", []),
         data.get("vidro_agrupado", []),
+        data.get("otimizacao_barras", {}),
     )
     return Response(
         content=xlsx_bytes,
@@ -344,12 +394,19 @@ def export_csv(req: Optional[ExportRequest] = None) -> Response:
         data["items"],
         data["corte_agrupado"],
         data.get("vidro_agrupado", []),
+        bar_optimization=data.get("otimizacao_barras", {}),
         mode=mode,
     )
     if mode == "corte":
         filename = "corte_serra_portas.csv"
     elif mode == "vidro":
         filename = "corte_vidros_portas.csv"
+    elif mode == "otimizacao_barras":
+        filename = "otimizacao_barras_6m.csv"
+    elif mode == "otimizacao_grupo2":
+        filename = "otimizacao_grupo2_barras_6m.csv"
+    elif mode == "otimizacao_sobras":
+        filename = "otimizacao_nao_alocados.csv"
     else:
         filename = "itens_portas.csv"
     return Response(
@@ -370,6 +427,7 @@ def export_json(req: Optional[ExportRequest] = None) -> Response:
         data["corte_agrupado"],
         data.get("vidro_detalhado", []),
         data.get("vidro_agrupado", []),
+        data.get("otimizacao_barras", {}),
     )
     return Response(
         content=json_bytes,

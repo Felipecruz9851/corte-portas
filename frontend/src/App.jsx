@@ -1,10 +1,11 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
-import { Layers, Ruler, SlidersHorizontal, Square } from "lucide-react";
+import { Layers, Ruler, Scissors, SlidersHorizontal, Square } from "lucide-react";
 import Sidebar from "./components/Sidebar";
 import Header from "./components/Header";
 import MetricsCards from "./components/MetricsCards";
 import ItemsTab from "./components/ItemsTab";
 import BarsCutTab from "./components/BarsCutTab";
+import OptimizationTab from "./components/OptimizationTab";
 import GlassCutTab from "./components/GlassCutTab";
 import RulesTab from "./components/RulesTab";
 import PieceDetailDialog from "./components/PieceDetailDialog";
@@ -14,6 +15,7 @@ import { getTodayIso } from "./utils/formatters";
 const TABS = [
   { id: "tab-itens", panelId: "panel-itens", label: "Construção das Peças", icon: Layers },
   { id: "tab-corte", panelId: "panel-corte", label: "Plano de Corte de Barras", icon: Ruler },
+  { id: "tab-otimizacao", panelId: "panel-otimizacao", label: "Otimização Barras 6m", icon: Scissors },
   { id: "tab-vidros", panelId: "panel-vidros", label: "Plano de Corte de Vidros", icon: Square },
   { id: "tab-regras", panelId: "panel-regras", label: "Regras e Descontos (mm)", icon: SlidersHorizontal },
 ];
@@ -28,6 +30,14 @@ export default function App() {
 
   const [isLoading, setIsLoading] = useState(false);
   const [isSavingRules, setIsSavingRules] = useState(false);
+  const [isOptimizing, setIsOptimizing] = useState(false);
+  const [optimizationConfig, setOptimizationConfig] = useState({
+    comprimento_barra_mm: 6000,
+    perda_maxima_mm: 200,
+    espessura_serra_mm: 0,
+    desponte_mm: 0,
+    separar_por_acabamento: false,
+  });
   const [exportingKey, setExportingKey] = useState(null);
   const [status, setStatus] = useState({
     message: "Pronto para consultar o ERP ou carregar um arquivo HTML de OP.",
@@ -53,6 +63,9 @@ export default function App() {
     setPayload(nextPayload);
     if (nextPayload?.rules) {
       setRules(nextPayload.rules);
+    }
+    if (nextPayload?.otimizacao_barras?.config) {
+      setOptimizationConfig(nextPayload.otimizacao_barras.config);
     }
   }, []);
 
@@ -220,6 +233,30 @@ export default function App() {
     }
   };
 
+  const handleOptimizeBars = async (nextConfig) => {
+    setIsOptimizing(true);
+    setStatus({ message: "Otimizando barras de 6 m por grupo de perfil...", kind: "" });
+    try {
+      const result = await fetchJson("/api/optimize/bars", {
+        method: "POST",
+        body: JSON.stringify(nextConfig),
+      });
+      if (result?.config) {
+        setOptimizationConfig(result.config);
+      }
+      setPayload((prev) => (prev ? { ...prev, otimizacao_barras: result } : prev));
+      const r = result?.resumo || {};
+      setStatus({
+        message: `Otimização concluída: G1 ${r.total_barras_6m ?? 0} barra(s), G2 ${r.total_barras_grupo2 ?? 0} barra(s) · Aproveit. médio ${r.aproveitamento_medio_geral_pct ?? 0}%/barra · Perda total ${r.total_perda_geral_mm ?? 0} mm.`,
+        kind: "ok",
+      });
+    } catch (err) {
+      setStatus({ message: err.message, kind: "err" });
+    } finally {
+      setIsOptimizing(false);
+    }
+  };
+
   const handleExport = async (key, endpoint, body, filename) => {
     setExportingKey(key);
     try {
@@ -348,6 +385,27 @@ export default function App() {
                   groupedBars={payload?.corte_agrupado || []}
                   detailedBars={payload?.corte_detalhado || []}
                   items={items}
+                />
+              </div>
+
+              <div
+                ref={(el) => {
+                  panelRefs.current["panel-otimizacao"] = el;
+                }}
+                role="tabpanel"
+                id="panel-otimizacao"
+                aria-labelledby="tab-otimizacao"
+                tabIndex={activeTab === "tab-otimizacao" ? 0 : undefined}
+                hidden={activeTab === "tab-otimizacao" ? undefined : "until-found"}
+              >
+                <OptimizationTab
+                  optimization={payload?.otimizacao_barras}
+                  config={optimizationConfig}
+                  isOptimizing={isOptimizing}
+                  onOptimize={handleOptimizeBars}
+                  onExport={handleExport}
+                  exportingKey={exportingKey}
+                  hasData={hasData}
                 />
               </div>
 

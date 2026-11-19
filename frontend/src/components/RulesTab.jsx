@@ -21,7 +21,11 @@ export default function RulesTab({
     setIsDirty(true);
     setDraftRules((prev) => {
       const current = { ...prev[key] };
-      if (field === "tipo_corte") {
+      if (
+        field === "tipo_corte" ||
+        field === "codigo_perfil_lateral" ||
+        field === "codigo_perfil_puxador"
+      ) {
         current[field] = rawValue;
       } else {
         current[field] = rawValue === "" ? "" : Number(rawValue);
@@ -48,6 +52,8 @@ export default function RulesTab({
       const r = draftRules[key];
       normalized[key] = {
         ...r,
+        codigo_perfil_lateral: String(r.codigo_perfil_lateral || "").trim(),
+        codigo_perfil_puxador: String(r.codigo_perfil_puxador || "").trim(),
         largura_perfil_quadro_mm: Number(r.largura_perfil_quadro_mm) || 0,
         largura_perfil_puxador_mm: Number(r.largura_perfil_puxador_mm) || 0,
         desconto_adjacente_puxador_mm: Number(r.desconto_adjacente_puxador_mm) || 0,
@@ -77,7 +83,7 @@ export default function RulesTab({
             )}
           </div>
           <p className="text-xs text-lider-slate leading-relaxed">
-            Perfis: quando o puxador for mais largo que o quadro (ex.: Clear G = 80 vs 45 mm), desconta a diferença (35 mm) das barras adjacentes ao puxador. Vidros: informe o desconto por lado sem puxador (Lateral) e por lado com puxador (Puxador).
+            Perfis: cadastre os códigos de perfil (Lateral e Puxador) para unificar o agrupamento na otimização de barras de 6 m (quando vazios, agrupa por Modelo + Tipo). Quando o puxador for mais largo que o quadro (ex.: Clear G = 80 vs 45 mm), desconta a diferença (35 mm) das barras adjacentes. Vidros: informe o desconto por lado sem puxador (Lateral) e com puxador (Puxador).
           </p>
         </div>
 
@@ -123,6 +129,8 @@ export default function RulesTab({
               <th>Modelo</th>
               <th>Descrição</th>
               <th>Tipo de Corte</th>
+              <th>Cód. Perfil Lateral</th>
+              <th>Cód. Perfil Puxador</th>
               <th className="num-header">Larg. Quadro (mm)</th>
               <th className="num-header">Larg. Puxador (mm)</th>
               <th className="num-header">Desc. Adj. Puxador (mm)</th>
@@ -137,7 +145,7 @@ export default function RulesTab({
           <tbody>
             {!sortedKeys.length ? (
               <tr>
-                <td colSpan={12} className="empty-cell text-center py-12 text-lider-muted">
+                <td colSpan={14} className="empty-cell text-center py-12 text-lider-muted">
                   Carregando regras de corte...
                 </td>
               </tr>
@@ -146,6 +154,8 @@ export default function RulesTab({
                 const r = draftRules[key];
                 const inputCls =
                   "w-24 h-8 px-2 bg-lider-surface border border-lider-border rounded-[2px] text-right font-mono text-xs text-lider-ink tabular-nums focus:border-lider-wood focus:outline-none transition-colors";
+                const codeInputCls =
+                  "w-28 h-8 px-2 bg-lider-surface border border-lider-border rounded-[2px] text-left font-mono text-xs text-lider-ink placeholder:text-lider-muted/60 focus:border-lider-wood focus:outline-none transition-colors";
                 return (
                   <tr key={key}>
                     <th scope="row">
@@ -169,6 +179,44 @@ export default function RulesTab({
                         <option value="90° (Topo)">90° (Topo)</option>
                         <option value="90° (Explícito)">90° (Explícito)</option>
                       </select>
+                    </td>
+                    <td>
+                      <input
+                        type="text"
+                        value={r.codigo_perfil_lateral ?? ""}
+                        onChange={(e) =>
+                          handleFieldChange(
+                            key,
+                            "codigo_perfil_lateral",
+                            e.target.value
+                          )
+                        }
+                        placeholder="Ex: 5307"
+                        autoCorrect="off"
+                        autoCapitalize="none"
+                        spellCheck={false}
+                        aria-label={`Código do perfil lateral para ${r.modelo}`}
+                        className={codeInputCls}
+                      />
+                    </td>
+                    <td>
+                      <input
+                        type="text"
+                        value={r.codigo_perfil_puxador ?? ""}
+                        onChange={(e) =>
+                          handleFieldChange(
+                            key,
+                            "codigo_perfil_puxador",
+                            e.target.value
+                          )
+                        }
+                        placeholder="Ex: 5317"
+                        autoCorrect="off"
+                        autoCapitalize="none"
+                        spellCheck={false}
+                        aria-label={`Código do perfil puxador para ${r.modelo}`}
+                        className={codeInputCls}
+                      />
                     </td>
                     <td className="num">
                       <input

@@ -13,7 +13,7 @@ tags: [regras-negocio, calculo, parametros, portas]
 
 - **Variáveis de Entrada Obrigatórias:**
   - `RawOpRow` (`codigo`, `descricao`, `quantidade`, `op`, `pedido`, `data_entrega`, `ambiente`) extraído por `./backend/app/html_parser.py`.
-  - `regras_corte.json`: `desconto_vertical_mm`, `desconto_horizontal_mm`, `desconto_divisoria_mm`, `largura_perfil_quadro_mm`, `largura_perfil_puxador_mm`, `desconto_adjacente_puxador_mm`, `desconto_vidro_lateral_mm`, `desconto_vidro_puxador_mm` e `tipo_corte` por modelo.
+  - `regras_corte.json`: `codigo_perfil_lateral`, `codigo_perfil_puxador`, `desconto_vertical_mm`, `desconto_horizontal_mm`, `desconto_divisoria_mm`, `largura_perfil_quadro_mm`, `largura_perfil_puxador_mm`, `desconto_adjacente_puxador_mm`, `desconto_vidro_lateral_mm`, `desconto_vidro_puxador_mm` e `tipo_corte` por modelo.
 - **Condicionais Críticas:**
   - **ALLU (`ESCADA`, `NICHO`, `LATERAL`, `PE`, `ILHA`):** Um quadro externo fechado (`2` verticais na altura + `2` horizontais na largura, ou `1` horizontal se `ALLU EM U`) somado às divisórias internas na largura (`qtd_divisorias`), multiplicado por `quantidade * qtd_estruturas`.
   - **`CLEAR_S_PUXADOR` vs `S/PUXADOR`:** `CLEAR_S_PUXADOR` identifica o modelo `CLEAR S` com puxador; ausência de puxador ocorre apenas com `S/PUXADOR`, `SEM PUXADOR`, `SEM PUXADRO`, `_SEM PUX` ou `SEM USINAGEM`.
@@ -33,4 +33,4 @@ tags: [regras-negocio, calculo, parametros, portas]
 
 ## Dependências
 
-**⬅️ Consumido por:** [[02-Backend-API/API-Extracao-ERP-Portas]]
+**⬅️ Consumido por:** [[02-Backend-API/API-Extracao-ERP-Portas]], [[03-Dominio-Calculos/Otimizacao-Barras-6m]]

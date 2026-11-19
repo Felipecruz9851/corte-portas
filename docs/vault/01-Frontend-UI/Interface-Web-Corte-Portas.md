@@ -8,16 +8,17 @@ tags: [codigo, frontend, react, vite, tailwind, ui, lider-design]
 
 # Módulo: Interface Web — Corte local portas (Lider Design)
 
-**Responsabilidade:** Aplicação SPA em **React + Vite + Tailwind CSS** estilizada conforme a identidade visual **Lider Design** (`./docs/referencias/Guia_Consolidado_UI_UX_Lider.md` e `./docs/referencias/Guia de Identidade UI_UX_ Estilo Lider Design.md`), oferecendo consulta ao vivo do ERP (`PHPSESSID` ou Usuário/Senha), upload/drag-and-drop de HTML local, cartões de KPIs, abas navegáveis por teclado (`Construção das Peças`, `Plano de Corte de Barras`, `Plano de Corte de Vidros` e `Regras e Descontos (mm)`), modal 2D proporcional em SVG e exportação direta.
+**Responsabilidade:** Aplicação SPA em **React + Vite + Tailwind CSS** estilizada conforme a identidade visual **Lider Design** (`./docs/referencias/Guia_Consolidado_UI_UX_Lider.md` e `./docs/referencias/Guia de Identidade UI_UX_ Estilo Lider Design.md`), oferecendo consulta ao vivo do ERP (`PHPSESSID` ou Usuário/Senha), upload/drag-and-drop de HTML local, cartões de KPIs, abas navegáveis por teclado (`Construção das Peças`, `Plano de Corte de Barras`, `Otimização Barras 6m`, `Plano de Corte de Vidros` e `Regras e Descontos (mm)`), modal 2D proporcional em SVG e exportação direta.
 
 ## Arquitetura e Componentes (`./frontend/src/`)
-* `App.jsx`: Orquestração de estado (React Hooks), abas com `focusgroup="tablist nomemory"` e `hidden="until-found"`, chamadas REST e controle de modal.
+* `App.jsx`: Orquestração de estado (React Hooks), abas com `focusgroup="tablist nomemory"` e `hidden="until-found"`, chamadas REST (incluindo `POST /api/optimize/bars`) e controle de modal.
 * `components/Sidebar.jsx`: Barra lateral fixa à esquerda (recolhível em desktop e drawer em mobile) exibindo a logomarca `./frontend/public/logo_lider.png` no topo esquerdo, formulário ERP, zona de drag-and-drop HTML, banner de status e resumo da sessão.
 * `components/Header.jsx`: Cabeçalho fixo no topo com fallback da logomarca no topo esquerdo quando recolhida/mobile, título editorial e ações globais de exportação (`Excel .xlsx`, `CSV Itens`, `CSV Serra`, `CSV Vidros`, `JSON`).
 * `components/MetricsCards.jsx`: Grid responsivo com 6 cartões minimalistas de métricas (`#FFFFFF` sobre canvas `#F8F8F8`, borda `#E0E0E0`, sombra difusa `rgba(0,0,0,0.05)`).
 * `components/ItemsTab.jsx`: Filtros combinados, ordenação por coluna e tabela responsiva (empilhamento em cards via `@container (width < 640px)`).
-* `components/BarsCutTab.jsx` & `components/GlassCutTab.jsx`: Alternância Agrupado/Detalhado, filtro por modelo, busca rápida e totalizadores dinâmicos.
-* `components/RulesTab.jsx`: Edição em grade das regras por modelo com cálculo automático em tempo real de `desconto_adjacente_puxador_mm`.
+* `components/BarsCutTab.jsx` & `components/GlassCutTab.jsx`: Alternância Agrupado/Detalhado, exibição de `Cód. Perfil` nas barras, filtro por modelo, busca rápida e totalizadores dinâmicos.
+* `components/OptimizationTab.jsx`: Parâmetros configuráveis (`Barra mm`, `Perda Máxima cm`, `Serra/Kerf`, `Desponte`, `Separar por acabamento`), 6 cartões de KPIs (Grupo 1, Grupo 2 Otimizado e Geral com aproveitamento médio por barra e perda total), acordeão nativo `<details>` por grupo de perfil, diagrama visual 1D proporcional para barras do Grupo 1 (`#N`) e do Grupo 2 otimizado (`G2 #N`), alternância no Grupo 2 entre barras otimizadas e tabelas ordenadas do maior para o menor, com exportações CSV dedicadas (`CSV Barras G1`, `CSV Barras G2`, `CSV Peças G2`).
+* `components/RulesTab.jsx`: Edição em grade das regras por modelo, incluindo cadastro de `Cód. Perfil Lateral` e `Cód. Perfil Puxador`, e cálculo automático em tempo real de `desconto_adjacente_puxador_mm`.
 * `components/PieceDetailDialog.jsx`: Modal nativo `<dialog closedby="any">` com navegação Anterior/Próxima, diagrama 2D SVG na paleta Lider Design (`#222222`, `#8B5A2B`, `#A0522D`) e detalhamento técnico.
 
 ## Dependências (Grafo)

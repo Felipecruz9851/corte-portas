@@ -12,10 +12,11 @@ tags: [codigo, backend, python, fastapi]
 
 ## Principais Funções / Métodos
 * `serve_index()`, `serve_logo()`, `serve_favicon()` e montagem de `/static`: Servem `./frontend/dist/index.html`, `./frontend/dist/logo_lider.png`, `./frontend/dist/favicon.ico` e `./frontend/dist/static/` (`app.js`, `styles.css`), com fallback para `./frontend/`.
-* `extract_from_erp()` (`POST /api/extract/erp`): Consulta uma ou mais datas em `http://192.168.0.6/pcp/op_abertura.php` e retorna itens extraídos, barras, vidros e KPIs.
-* `extract_from_html()` (`POST /api/extract/html`): Executa o mesmo pipeline a partir de um HTML enviado.
-* `get_rules()`, `update_rules()`, `reset_rules()`: Lê, atualiza e reseta `./backend/app/data/regras_corte.json` recalculando os cortes em memória.
-* `export_xlsx()`, `export_csv()`, `export_json()`: Exportam planilhas formatadas via `./backend/app/exporter.py`.
+* `extract_from_erp()` (`POST /api/extract/erp`): Consulta uma ou mais datas em `http://192.168.0.6/pcp/op_abertura.php` e retorna itens extraídos, barras, vidros, `otimizacao_barras` e KPIs.
+* `extract_from_html()` (`POST /api/extract/html`): Executa o mesmo pipeline (incluindo `otimizacao_barras`) a partir de um HTML enviado.
+* `optimize_bars()` (`POST /api/optimize/bars`): Recalcula em memória a otimização linear em barras (padrão 6m) para Grupo 1 e Grupo 2 a partir de parâmetros configuráveis (`comprimento_barra_mm`, `perda_maxima_mm`, `espessura_serra_mm`, `desponte_mm`, `separar_por_acabamento`), retornando KPIs de aproveitamento médio por barra e perda total por grupo e geral.
+* `get_rules()`, `update_rules()`, `reset_rules()`: Lê, atualiza e reseta `./backend/app/data/regras_corte.json` (incluindo `codigo_perfil_lateral` e `codigo_perfil_puxador`) recalculando os cortes e a otimização em memória.
+* `export_xlsx()`, `export_csv()`, `export_json()`: Exportam planilhas formatadas via `./backend/app/exporter.py`, incluindo abas `Otimizacao_Barras_6m`, `Otimizacao_Grupo2_Barras` e `Otimizacao_Nao_Alocados` no `.xlsx` e modos `otimizacao_barras`, `otimizacao_grupo2` e `otimizacao_sobras` no CSV.
 
 ## Dependências (Grafo)
 **⬅️ Quem chama este módulo (Entrada):**
@@ -24,4 +25,5 @@ tags: [codigo, backend, python, fastapi]
 **➡️ Quem este módulo chama (Saída/Uso):**
 * [[04-Infra-Dados/Integracao-HTTP-ERP]]
 * [[03-Dominio-Calculos/Regras-Extracao-e-Corte-Perfis]]
+* [[03-Dominio-Calculos/Otimizacao-Barras-6m]]
 * **Bibliotecas Externas:** `fastapi`, `pydantic`, `pandas`, `openpyxl`.

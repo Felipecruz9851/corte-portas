@@ -59,12 +59,66 @@ def _flatten_items_for_table(items: List[Dict[str, Any]]) -> List[Dict[str, Any]
     return rows
 
 
+def _flatten_optimized_bars_for_table(
+    bar_opt: Optional[Dict[str, Any]],
+    key: str = "barras_otimizadas_flat",
+) -> List[Dict[str, Any]]:
+    barras = (bar_opt or {}).get(key) or []
+    rows: List[Dict[str, Any]] = []
+    for b in barras:
+        rows.append(
+            {
+                "Barra_Global": b.get("barra_global_numero"),
+                "Grupo": b.get("grupo_nome"),
+                "Origem_Agrupamento": b.get("origem_agrupamento"),
+                "Codigo_Perfil": b.get("codigo_perfil") or "",
+                "Barra_Grupo": b.get("barra_numero"),
+                "Comprimento_Barra_mm": b.get("comprimento_barra_mm"),
+                "Qtd_Pecas": b.get("qtd_pecas"),
+                "Soma_Pecas_mm": b.get("soma_pecas_mm"),
+                "Perda_Serra_Desponte_mm": b.get("perda_serra_desponte_mm"),
+                "Perda_mm": b.get("perda_mm"),
+                "Perda_cm": b.get("perda_cm"),
+                "Aproveitamento_pct": b.get("aproveitamento_pct"),
+                "Padrao_Corte": b.get("padrao_corte"),
+                "OPs": b.get("ops"),
+            }
+        )
+    return rows
+
+
+def _flatten_unplaced_for_table(
+    bar_opt: Optional[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    unplaced = (bar_opt or {}).get("nao_alocados_agrupados_flat") or []
+    rows: List[Dict[str, Any]] = []
+    for p in unplaced:
+        rows.append(
+            {
+                "Grupo": p.get("grupo_nome"),
+                "Codigo_Perfil": p.get("codigo_perfil") or "",
+                "Modelo": p.get("modelo"),
+                "Tipo_Perfil": p.get("tipo_perfil"),
+                "Acabamento_Perfil": p.get("acabamento_perfil"),
+                "Funcao_Barra": p.get("funcao_barra"),
+                "Tipo_Corte": p.get("tipo_corte"),
+                "Medida_Corte_mm": p.get("medida_corte_mm"),
+                "Qtd_Pecas": p.get("qtd_pecas"),
+                "Total_Metros": p.get("total_metros"),
+                "Motivo": p.get("motivo"),
+                "OPs": p.get("ops"),
+            }
+        )
+    return rows
+
+
 def export_to_xlsx_bytes(
     items: List[Dict[str, Any]],
     detailed_bars: List[Dict[str, Any]],
     grouped_bars: List[Dict[str, Any]],
     detailed_glasses: Optional[List[Dict[str, Any]]] = None,
     grouped_glasses: Optional[List[Dict[str, Any]]] = None,
+    bar_optimization: Optional[Dict[str, Any]] = None,
 ) -> bytes:
     """Gera pasta de trabalho Excel multi-abas formatada em memória."""
     df_items = pd.DataFrame(_flatten_items_for_table(items))
@@ -72,6 +126,13 @@ def export_to_xlsx_bytes(
     df_grouped = pd.DataFrame(grouped_bars)
     df_glass_det = pd.DataFrame(detailed_glasses or [])
     df_glass_grp = pd.DataFrame(grouped_glasses or [])
+    df_opt_bars = pd.DataFrame(
+        _flatten_optimized_bars_for_table(bar_optimization, "barras_otimizadas_flat")
+    )
+    df_opt_g2_bars = pd.DataFrame(
+        _flatten_optimized_bars_for_table(bar_optimization, "barras_grupo2_flat")
+    )
+    df_opt_unplaced = pd.DataFrame(_flatten_unplaced_for_table(bar_optimization))
 
     buffer = io.BytesIO()
     with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
@@ -80,6 +141,13 @@ def export_to_xlsx_bytes(
         df_grouped.to_excel(writer, sheet_name="Resumo_Corte_Serra", index=False)
         df_glass_det.to_excel(writer, sheet_name="Lista_Corte_Vidros", index=False)
         df_glass_grp.to_excel(writer, sheet_name="Resumo_Corte_Vidros", index=False)
+        df_opt_bars.to_excel(writer, sheet_name="Otimizacao_Barras_6m", index=False)
+        df_opt_g2_bars.to_excel(
+            writer, sheet_name="Otimizacao_Grupo2_Barras", index=False
+        )
+        df_opt_unplaced.to_excel(
+            writer, sheet_name="Otimizacao_Nao_Alocados", index=False
+        )
 
         wb = writer.book
         header_fill = PatternFill(
@@ -113,13 +181,24 @@ def export_to_csv_bytes(
     items: List[Dict[str, Any]],
     grouped_bars: List[Dict[str, Any]],
     grouped_glasses: Optional[List[Dict[str, Any]]] = None,
+    bar_optimization: Optional[Dict[str, Any]] = None,
     mode: str = "items",
 ) -> bytes:
-    """Exporta itens, resumo de corte de barras ou resumo de vidros em CSV (; UTF-8 BOM)."""
+    """Exporta itens, resumo de corte, vidros ou otimização em CSV (; UTF-8 BOM)."""
     if mode == "corte":
         df = pd.DataFrame(grouped_bars)
     elif mode == "vidro":
         df = pd.DataFrame(grouped_glasses or [])
+    elif mode == "otimizacao_barras":
+        df = pd.DataFrame(
+            _flatten_optimized_bars_for_table(bar_optimization, "barras_otimizadas_flat")
+        )
+    elif mode == "otimizacao_grupo2":
+        df = pd.DataFrame(
+            _flatten_optimized_bars_for_table(bar_optimization, "barras_grupo2_flat")
+        )
+    elif mode == "otimizacao_sobras":
+        df = pd.DataFrame(_flatten_unplaced_for_table(bar_optimization))
     else:
         df = pd.DataFrame(_flatten_items_for_table(items))
 
@@ -135,6 +214,7 @@ def export_to_json_bytes(
     grouped_bars: List[Dict[str, Any]],
     detailed_glasses: Optional[List[Dict[str, Any]]] = None,
     grouped_glasses: Optional[List[Dict[str, Any]]] = None,
+    bar_optimization: Optional[Dict[str, Any]] = None,
 ) -> bytes:
     payload = {
         "meta": meta,
@@ -144,5 +224,6 @@ def export_to_json_bytes(
         "corte_agrupado": grouped_bars,
         "vidro_detalhado": detailed_glasses or [],
         "vidro_agrupado": grouped_glasses or [],
+        "otimizacao_barras": bar_optimization or {},
     }
     return json.dumps(payload, indent=2, ensure_ascii=False).encode("utf-8")

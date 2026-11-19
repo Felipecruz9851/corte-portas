@@ -21,6 +21,8 @@ class CuttingRule:
     desconto_vertical_mm: float
     desconto_horizontal_mm: float
     desconto_divisoria_mm: float
+    codigo_perfil_lateral: str = ""
+    codigo_perfil_puxador: str = ""
     largura_perfil_quadro_mm: float = 0.0
     largura_perfil_puxador_mm: float = 0.0
     desconto_adjacente_puxador_mm: float = 0.0
@@ -88,6 +90,7 @@ class CutBar:
     medida_corte_mm: float
     tipo_corte: str
     observacao_corte: str = ""
+    tipo_perfil: str = "Lateral"
 
     @property
     def total_mm(self) -> float:
@@ -144,6 +147,10 @@ def compute_item_cuts(
     ) -> None:
         if qtd <= 0 or nominal <= 0:
             return
+        tipo_perfil = "Puxador" if eh_puxador else "Lateral"
+        codigo_perfil_regra = (
+            rule.codigo_perfil_puxador if eh_puxador else rule.codigo_perfil_lateral
+        ).strip()
         bars.append(
             CutBar(
                 op=item.op,
@@ -152,7 +159,7 @@ def compute_item_cuts(
                 data_entrega=item.data_entrega,
                 categoria=item.categoria,
                 modelo=item.modelo,
-                codigo_perfil=item.codigo_perfil,
+                codigo_perfil=codigo_perfil_regra,
                 acabamento_perfil=item.acabamento_perfil or "PADRAO",
                 funcao_barra=funcao,
                 orientacao=orientacao,
@@ -163,6 +170,7 @@ def compute_item_cuts(
                 medida_corte_mm=_safe_cut(nominal, desconto),
                 tipo_corte=rule.tipo_corte,
                 observacao_corte=obs,
+                tipo_perfil=tipo_perfil,
             )
         )
 
@@ -378,6 +386,8 @@ def build_cutting_plan(
     for bar in detailed_bars:
         key = (
             bar.modelo,
+            bar.codigo_perfil,
+            bar.tipo_perfil,
             bar.acabamento_perfil,
             bar.funcao_barra,
             bar.orientacao,
@@ -388,6 +398,8 @@ def build_cutting_plan(
         if key not in grouped:
             grouped[key] = {
                 "modelo": bar.modelo,
+                "codigo_perfil": bar.codigo_perfil,
+                "tipo_perfil": bar.tipo_perfil,
                 "acabamento_perfil": bar.acabamento_perfil,
                 "funcao_barra": bar.funcao_barra,
                 "orientacao": bar.orientacao,
@@ -409,6 +421,8 @@ def build_cutting_plan(
         summary_list.append(
             {
                 "modelo": entry["modelo"],
+                "codigo_perfil": entry["codigo_perfil"],
+                "tipo_perfil": entry["tipo_perfil"],
                 "acabamento_perfil": entry["acabamento_perfil"],
                 "funcao_barra": entry["funcao_barra"],
                 "orientacao": entry["orientacao"],
