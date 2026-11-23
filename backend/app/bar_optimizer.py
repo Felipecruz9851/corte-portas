@@ -60,6 +60,8 @@ class OptimizationConfig:
     espessura_serra_mm: float = 0.0
     desponte_mm: float = 0.0
     separar_por_acabamento: bool = False
+    priorizar_mesma_medida: bool = False
+    limite_sobras_simultaneas: Optional[int] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -515,6 +517,29 @@ def _concentrate_scrap(
     return [b for b in bins if b]
 
 
+def _validate_packed_bins(
+    bins: List[Dict[int, int]],
+    weights: List[int],
+    counts: List[int],
+    cap_um: int,
+) -> List[Dict[int, int]]:
+    m = len(weights)
+    used_check = [0] * m
+    valid_bins: List[Dict[int, int]] = []
+    for pat in bins:
+        clean_pat = {i: q for i, q in pat.items() if q > 0}
+        if not clean_pat:
+            continue
+        pat_sum = _bin_fill_um(clean_pat, weights)
+        if pat_sum <= cap_um and all(
+            used_check[i] + q <= counts[i] for i, q in clean_pat.items()
+        ):
+            for i, q in clean_pat.items():
+                used_check[i] += q
+            valid_bins.append(clean_pat)
+    return valid_bins
+
+
 def _pack_min_bars(
     weights: List[int],
     counts: List[int],
@@ -546,22 +571,39 @@ def _pack_min_bars(
             best_bins = reduced
 
     best_bins = _concentrate_scrap(best_bins, weights, cap_um)
+    return _validate_packed_bins(best_bins, weights, counts, cap_um)
 
-    used_check = [0] * m
-    valid_bins: List[Dict[int, int]] = []
-    for pat in best_bins:
-        clean_pat = {i: q for i, q in pat.items() if q > 0}
-        if not clean_pat:
-            continue
-        pat_sum = _bin_fill_um(clean_pat, weights)
-        if pat_sum <= cap_um and all(
-            used_check[i] + q <= counts[i] for i, q in clean_pat.items()
-        ):
-            for i, q in clean_pat.items():
-                used_check[i] += q
-            valid_bins.append(clean_pat)
 
-    return valid_bins
+def _pack_same_measure_first(
+    weights: List[int],
+    counts: List[int],
+    cap_um: int,
+) -> List[Dict[int, int]]:
+    """Empacota priorizando peças da mesma medida na mesma barra (serra manual)."""
+    m = len(weights)
+    if m == 0 or sum(counts) == 0:
+        return []
+
+    bins: List[List[Any]] = []
+    for idx, q in enumerate(counts):
+        w = weights[idx]
+        for _ in range(q):
+            best_b = -1
+            best_key: Optional[Tuple[int, int]] = None
+            for b_idx, (b_rem, pat) in enumerate(bins):
+                if w <= b_rem:
+                    key = (1 if idx in pat else 0, -b_rem)
+                    if best_key is None or key > best_key:
+                        best_key = key
+                        best_b = b_idx
+            if best_b >= 0:
+                bins[best_b][0] -= w
+                pat = bins[best_b][1]
+                pat[idx] = pat.get(idx, 0) + 1
+            else:
+                bins.append([cap_um - w, {idx: 1}])
+
+    return _validate_packed_bins([pat for _, pat in bins], weights, counts, cap_um)
 
 
 def _orient_piece_for_angle(
@@ -997,6 +1039,9 @@ def _build_bar_dict(
     perfil_sim = bool(clean_pieces) and all(
         bool(p.get("perfil_simetrico")) for p in clean_pieces
     )
+    medidas_distintas_barra = len(
+        {round(float(p["medida_corte_mm"]), 3) for p in clean_pieces}
+    )
 
     return {
         "cenario": cenario,
@@ -1007,6 +1052,7 @@ def _build_bar_dict(
         "barra_numero": barra_numero,
         "comprimento_barra_mm": round(cfg.comprimento_barra_mm, 3),
         "qtd_pecas": len(clean_pieces),
+        "medidas_distintas_barra": medidas_distintas_barra,
         "soma_pecas_mm": _from_um(soma_pecas_um),
         "perda_serra_desponte_mm": _from_um(serra_desp_um),
         "consumido_mm": _from_um(consumido_um),
@@ -1080,7 +1126,11 @@ def _build_material_group(
     weights = sorted(weight_counts.keys(), reverse=True)
     counts = [weight_counts[w] for w in weights]
 
-    patterns = _pack_min_bars(weights, counts, pack_cap_um)
+    patterns = (
+        _pack_same_measure_first(weights, counts, pack_cap_um)
+        if cfg.priorizar_mesma_medida
+        else _pack_min_bars(weights, counts, pack_cap_um)
+    )
     ordered_bars = _assign_and_order_material_bars(
         patterns, weights, buckets_by_w_sig
     )
@@ -1097,6 +1147,88 @@ def _build_material_group(
     return bars, ajustes, trocas_angulo
 
 
+def _annotate_rack_lifecycle(
+    roteiro_medidas: List[Dict[str, Any]],
+) -> Tuple[int, int]:
+    """Anota vagas do cavalete, próxima retomada, ação operacional e pico simultâneo."""
+    retomadas_sobras = sum(
+        step["qtd_sobras_reaproveitadas"] for step in roteiro_medidas
+    )
+    bar_steps: Dict[int, List[int]] = defaultdict(list)
+    for step in roteiro_medidas:
+        for alloc in step["alocacoes"]:
+            bar_steps[alloc["barra_numero"]].append(step["passo"])
+
+    active_slots: Dict[int, int] = {}
+    free_slots: List[int] = []
+    next_slot = 1
+
+    for step in roteiro_medidas:
+        passo = step["passo"]
+        # 1) Atualiza barras que já estavam no cavalete (e libera as que encerram neste passo)
+        for alloc in step["alocacoes"]:
+            b_num = alloc["barra_numero"]
+            st = bar_steps[b_num]
+            if len(st) <= 1:
+                alloc["vaga_cavalete"] = None
+                alloc["proximo_passo"] = None
+                alloc["eh_fim_barra"] = True
+                alloc["acao_cavalete"] = (
+                    "Fim da barra"
+                    if round(float(alloc["sobra_depois_mm"]), 3) <= 0.0
+                    else "Encerrar (sem cavalete)"
+                )
+                continue
+
+            if b_num in active_slots:
+                slot = active_slots[b_num]
+                pos = st.index(passo)
+                next_step = st[pos + 1] if pos + 1 < len(st) else None
+                alloc["vaga_cavalete"] = slot
+                alloc["proximo_passo"] = next_step
+                if next_step is None:
+                    alloc["eh_fim_barra"] = True
+                    alloc["acao_cavalete"] = f"Fim · Libera Vaga #{slot}"
+                    del active_slots[b_num]
+                    free_slots.append(slot)
+                    free_slots.sort()
+                else:
+                    alloc["eh_fim_barra"] = False
+                    alloc["acao_cavalete"] = (
+                        f"Manter · Vaga #{slot} (volta #{next_step})"
+                    )
+
+        # 2) Atribui vagas para barras novas deste passo que ainda voltarão em passos futuros
+        for alloc in step["alocacoes"]:
+            b_num = alloc["barra_numero"]
+            st = bar_steps[b_num]
+            if len(st) <= 1 or "vaga_cavalete" in alloc:
+                continue
+            pos = st.index(passo)
+            next_step = st[pos + 1] if pos + 1 < len(st) else None
+            if free_slots:
+                slot = free_slots.pop(0)
+            else:
+                slot = next_slot
+                next_slot += 1
+            active_slots[b_num] = slot
+            alloc["vaga_cavalete"] = slot
+            alloc["proximo_passo"] = next_step
+            alloc["eh_fim_barra"] = False
+            alloc["acao_cavalete"] = f"Guardar · Vaga #{slot} (volta #{next_step})"
+
+        step["cavalete_ocupacao"] = len(active_slots)
+
+    pico_sobras_simultaneas = max(
+        (
+            sum(1 for st in bar_steps.values() if min(st) < p_idx <= max(st))
+            for p_idx in range(1, len(roteiro_medidas) + 1)
+        ),
+        default=0,
+    )
+    return retomadas_sobras, pico_sobras_simultaneas
+
+
 def _build_tempo_execucao_group(
     eligible: List[Dict[str, Any]],
     gm: Dict[str, Any],
@@ -1105,92 +1237,51 @@ def _build_tempo_execucao_group(
     D_um: int,
     K_um: int,
     cap_um: int,
-) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], int, int]:
-    """Cenário 2: corte em lote por medida (maior → menor) com FFD em barras semi-cortadas."""
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], int, int, Dict[str, int]]:
+    """Cenário 2: corte em lote por medida (maior → menor) com cavalete por ondas."""
     usable_um = max(1, L_um - D_um)
+    rack_limit: Optional[int] = (
+        int(cfg.limite_sobras_simultaneas)
+        if cfg.limite_sobras_simultaneas and int(cfg.limite_sobras_simultaneas) > 0
+        else None
+    )
+
     by_med: Dict[float, List[Dict[str, Any]]] = defaultdict(list)
     for p in eligible:
         by_med[round(float(p["medida_corte_mm"]), 3)].append(p)
 
-    sorted_meds = sorted(by_med.keys(), reverse=True)
-    open_bars: List[Dict[str, Any]] = []
+    all_bars: List[Dict[str, Any]] = []
     roteiro_medidas: List[Dict[str, Any]] = []
     route_prev_angle: Optional[int] = None
     total_trocas_angulo_lote = 0
+    ciclos_drenagem = 0
 
-    for passo_idx, med_mm in enumerate(sorted_meds, start=1):
-        pcs_step, _ = _order_pieces_by_angle(
-            by_med[med_mm], start_angle=route_prev_angle, keep_internal=True
+    def _commit_step(
+        med_mm: float,
+        step_allocs_by_bar: Dict[int, List[Dict[str, Any]]],
+        had_pieces_before: Dict[int, bool],
+        sobra_before_um: Dict[int, int],
+        trocas_angulo_passo: int,
+        eh_drenagem: bool,
+    ) -> None:
+        if not step_allocs_by_bar:
+            return
+        passo_idx = len(roteiro_medidas) + 1
+        prev_med = (
+            roteiro_medidas[-1]["medida_corte_mm"] if roteiro_medidas else None
         )
-        trocas_angulo_passo = 0
-        cur_step_ang = route_prev_angle
-        for p in pcs_step:
-            a_e = _norm_angle(p.get("angulo_esq"), 45)
-            a_d = _norm_angle(p.get("angulo_dir"), 45)
-            if cur_step_ang is not None and a_e != cur_step_ang:
-                trocas_angulo_passo += 1
-            if a_e != a_d:
-                trocas_angulo_passo += 1
-            cur_step_ang = a_d
-        route_prev_angle = cur_step_ang
-        total_trocas_angulo_lote += trocas_angulo_passo
-
-        had_pieces_before: Dict[int, bool] = {}
-        sobra_before_um: Dict[int, int] = {}
-        step_allocs_by_bar: Dict[int, List[Dict[str, Any]]] = defaultdict(list)
-
-        for p in pcs_step:
-            c_um = p["_c_um"]
-            placed_bar = None
-            chosen_ov_um = 0
-            chosen_inc_um = c_um
-
-            for bar_state in open_bars:
-                ov_um = _calc_pair_overlap_um(bar_state["pieces"][-1], p)
-                inc_um = c_um + K_um - ov_um
-                if bar_state["consumido_util_um"] + inc_um <= usable_um:
-                    placed_bar = bar_state
-                    chosen_ov_um = ov_um
-                    chosen_inc_um = inc_um
-                    break
-
-            if placed_bar is None:
-                b_num = len(open_bars) + 1
-                placed_bar = {
-                    "barra_numero": b_num,
-                    "consumido_util_um": 0,
-                    "soma_pecas_um": 0,
-                    "econ_um": 0,
-                    "pieces": [],
-                }
-                open_bars.append(placed_bar)
-                had_pieces_before[b_num] = False
-                sobra_before_um[b_num] = max(0, L_um - D_um)
-                chosen_ov_um = 0
-                chosen_inc_um = c_um
-            else:
-                b_num = placed_bar["barra_numero"]
-                if b_num not in had_pieces_before:
-                    had_pieces_before[b_num] = True
-                    sobra_before_um[b_num] = max(
-                        0, L_um - (D_um + placed_bar["consumido_util_um"])
-                    )
-
-            placed_bar["consumido_util_um"] += chosen_inc_um
-            placed_bar["soma_pecas_um"] += c_um
-            placed_bar["econ_um"] += chosen_ov_um
-            clean_p = {k: v for k, v in p.items() if not k.startswith("_")}
-            placed_bar["pieces"].append(clean_p)
-            step_allocs_by_bar[b_num].append(clean_p)
+        troca_medida = prev_med is not None and med_mm != prev_med
 
         alocacoes: List[Dict[str, Any]] = []
         qtd_novas = 0
         qtd_sobras = 0
         step_ops = set()
+        step_pcs: List[Dict[str, Any]] = []
 
         for b_num in sorted(step_allocs_by_bar.keys()):
             alloc_pcs = step_allocs_by_bar[b_num]
-            bar_state = open_bars[b_num - 1]
+            step_pcs.extend(alloc_pcs)
+            bar_state = all_bars[b_num - 1]
             eh_sobra = bool(had_pieces_before[b_num])
             if eh_sobra:
                 qtd_sobras += 1
@@ -1241,7 +1332,7 @@ def _build_tempo_execucao_group(
                         _norm_angle(p.get("angulo_dir"), 45),
                     )
                 )
-                for p in pcs_step
+                for p in step_pcs
             }
         )
         roteiro_medidas.append(
@@ -1252,10 +1343,11 @@ def _build_tempo_execucao_group(
                 "codigo_perfil": gm["codigo_perfil"],
                 "passo": passo_idx,
                 "medida_corte_mm": med_mm,
-                "qtd_total_pecas": len(pcs_step),
-                "total_metros": round((len(pcs_step) * med_mm) / 1000.0, 3),
+                "eh_drenagem": eh_drenagem,
+                "qtd_total_pecas": len(step_pcs),
+                "total_metros": round((len(step_pcs) * med_mm) / 1000.0, 3),
                 "angulos_corte": ", ".join(step_angles),
-                "troca_medida": passo_idx > 1,
+                "troca_medida": troca_medida,
                 "troca_angulo": trocas_angulo_passo > 0,
                 "trocas_angulo_passo": trocas_angulo_passo,
                 "qtd_barras_novas": qtd_novas,
@@ -1270,8 +1362,329 @@ def _build_tempo_execucao_group(
             }
         )
 
+    def _record_cut_angle(p_cut: Dict[str, Any]) -> int:
+        nonlocal route_prev_angle
+        a_e = _norm_angle(p_cut.get("angulo_esq"), 45)
+        a_d = _norm_angle(p_cut.get("angulo_dir"), 45)
+        chg = 0
+        if route_prev_angle is not None and a_e != route_prev_angle:
+            chg += 1
+        if a_e != a_d:
+            chg += 1
+        route_prev_angle = a_d
+        return chg
+
+    if rack_limit is None:
+        sorted_meds = sorted(by_med.keys(), reverse=True)
+        for med_mm in sorted_meds:
+            pcs_step, _ = _order_pieces_by_angle(
+                by_med[med_mm], start_angle=route_prev_angle, keep_internal=True
+            )
+            trocas_angulo_passo = 0
+            for p in pcs_step:
+                trocas_angulo_passo += _record_cut_angle(p)
+            total_trocas_angulo_lote += trocas_angulo_passo
+
+            had_pieces_before: Dict[int, bool] = {}
+            sobra_before_um: Dict[int, int] = {}
+            step_allocs_by_bar: Dict[int, List[Dict[str, Any]]] = defaultdict(list)
+
+            for p in pcs_step:
+                c_um = p["_c_um"]
+                placed_bar = None
+                chosen_ov_um = 0
+                chosen_inc_um = c_um
+
+                for bar_state in all_bars:
+                    ov_um = _calc_pair_overlap_um(bar_state["pieces"][-1], p)
+                    inc_um = c_um + K_um - ov_um
+                    if bar_state["consumido_util_um"] + inc_um <= usable_um:
+                        placed_bar = bar_state
+                        chosen_ov_um = ov_um
+                        chosen_inc_um = inc_um
+                        break
+
+                if placed_bar is None:
+                    b_num = len(all_bars) + 1
+                    placed_bar = {
+                        "barra_numero": b_num,
+                        "consumido_util_um": 0,
+                        "soma_pecas_um": 0,
+                        "econ_um": 0,
+                        "pieces": [],
+                    }
+                    all_bars.append(placed_bar)
+                    had_pieces_before[b_num] = False
+                    sobra_before_um[b_num] = max(0, L_um - D_um)
+                    chosen_ov_um = 0
+                    chosen_inc_um = c_um
+                else:
+                    b_num = placed_bar["barra_numero"]
+                    if b_num not in had_pieces_before:
+                        had_pieces_before[b_num] = True
+                        sobra_before_um[b_num] = max(
+                            0, L_um - (D_um + placed_bar["consumido_util_um"])
+                        )
+
+                placed_bar["consumido_util_um"] += chosen_inc_um
+                placed_bar["soma_pecas_um"] += c_um
+                placed_bar["econ_um"] += chosen_ov_um
+                clean_p = {k: v for k, v in p.items() if not k.startswith("_")}
+                placed_bar["pieces"].append(clean_p)
+                step_allocs_by_bar[b_num].append(clean_p)
+
+            _commit_step(
+                med_mm,
+                step_allocs_by_bar,
+                had_pieces_before,
+                sobra_before_um,
+                trocas_angulo_passo,
+                eh_drenagem=False,
+            )
+    else:
+        rem_by_med: Dict[float, List[Dict[str, Any]]] = {
+            m: sorted(pcs, key=lambda x: (x["data_entrega"], x["op"], x["codigo"]))
+            for m, pcs in by_med.items()
+            if pcs
+        }
+        active_rack: List[Dict[str, Any]] = []
+
+        def _can_fit_any_remaining(bar_state: Dict[str, Any]) -> bool:
+            rem_space = usable_um - bar_state["consumido_util_um"]
+            if rem_space <= 0 or not rem_by_med:
+                return False
+            last_piece = bar_state["pieces"][-1]
+            for lst in rem_by_med.values():
+                if not lst:
+                    continue
+                cand = lst[0]
+                ov = _calc_pair_overlap_um(last_piece, cand)
+                if cand["_c_um"] + K_um - ov <= rem_space:
+                    return True
+            return False
+
+        def _retire_dead_bars() -> None:
+            active_rack[:] = [b for b in active_rack if _can_fit_any_remaining(b)]
+
+        def _place_best_fit_in_rack(
+            p: Dict[str, Any],
+            had_before: Dict[int, bool],
+            sobra_before: Dict[int, int],
+            step_allocs: Dict[int, List[Dict[str, Any]]],
+        ) -> bool:
+            c_um = p["_c_um"]
+            placed_bar = None
+            best_rem_after: Optional[int] = None
+            chosen_ov_um = 0
+            chosen_inc_um = c_um
+
+            for bar_state in active_rack:
+                ov_um = _calc_pair_overlap_um(bar_state["pieces"][-1], p)
+                inc_um = c_um + K_um - ov_um
+                rem_after = usable_um - (bar_state["consumido_util_um"] + inc_um)
+                if rem_after >= 0 and (
+                    best_rem_after is None
+                    or rem_after < best_rem_after
+                    or (
+                        rem_after == best_rem_after
+                        and placed_bar is not None
+                        and bar_state["barra_numero"] < placed_bar["barra_numero"]
+                    )
+                ):
+                    best_rem_after = rem_after
+                    placed_bar = bar_state
+                    chosen_ov_um = ov_um
+                    chosen_inc_um = inc_um
+
+            if placed_bar is None:
+                return False
+
+            b_num = placed_bar["barra_numero"]
+            if b_num not in had_before:
+                had_before[b_num] = True
+                sobra_before[b_num] = max(
+                    0, L_um - (D_um + placed_bar["consumido_util_um"])
+                )
+            placed_bar["consumido_util_um"] += chosen_inc_um
+            placed_bar["soma_pecas_um"] += c_um
+            placed_bar["econ_um"] += chosen_ov_um
+            clean_p = {k: v for k, v in p.items() if not k.startswith("_")}
+            placed_bar["pieces"].append(clean_p)
+            step_allocs[b_num].append(clean_p)
+            return True
+
+        def _drain_rack() -> None:
+            nonlocal total_trocas_angulo_lote, ciclos_drenagem
+            did_drain = False
+            while active_rack:
+                _retire_dead_bars()
+                if not active_rack:
+                    break
+
+                best_med: Optional[float] = None
+                for m in sorted(rem_by_med.keys(), reverse=True):
+                    lst = rem_by_med[m]
+                    if not lst:
+                        continue
+                    p0 = lst[0]
+                    if any(
+                        b["consumido_util_um"]
+                        + p0["_c_um"]
+                        + K_um
+                        - _calc_pair_overlap_um(b["pieces"][-1], p0)
+                        <= usable_um
+                        for b in active_rack
+                    ):
+                        best_med = m
+                        break
+
+                if best_med is None:
+                    active_rack.clear()
+                    break
+
+                lst, _ = _order_pieces_by_angle(
+                    rem_by_med[best_med], start_angle=route_prev_angle, keep_internal=True
+                )
+                rem_by_med[best_med] = lst
+
+                had_before: Dict[int, bool] = {}
+                sobra_before: Dict[int, int] = {}
+                step_allocs: Dict[int, List[Dict[str, Any]]] = defaultdict(list)
+                trocas_ang_step = 0
+
+                while lst:
+                    p_cand = lst[0]
+                    if not _place_best_fit_in_rack(
+                        p_cand, had_before, sobra_before, step_allocs
+                    ):
+                        break
+                    lst.pop(0)
+                    trocas_ang_step += _record_cut_angle(p_cand)
+
+                if not lst:
+                    del rem_by_med[best_med]
+                if step_allocs:
+                    did_drain = True
+                    total_trocas_angulo_lote += trocas_ang_step
+                    _commit_step(
+                        best_med,
+                        step_allocs,
+                        had_before,
+                        sobra_before,
+                        trocas_ang_step,
+                        eh_drenagem=True,
+                    )
+                _retire_dead_bars()
+
+            if did_drain:
+                ciclos_drenagem += 1
+
+        while rem_by_med:
+            cur_med = max(rem_by_med.keys())
+            if not rem_by_med[cur_med]:
+                del rem_by_med[cur_med]
+                continue
+
+            rem_by_med[cur_med], _ = _order_pieces_by_angle(
+                rem_by_med[cur_med], start_angle=route_prev_angle, keep_internal=True
+            )
+            had_before: Dict[int, bool] = {}
+            sobra_before: Dict[int, int] = {}
+            step_allocs: Dict[int, List[Dict[str, Any]]] = defaultdict(list)
+            trocas_ang_step = 0
+
+            while rem_by_med.get(cur_med):
+                lst = rem_by_med[cur_med]
+                p_next = lst[0]
+                if _place_best_fit_in_rack(
+                    p_next, had_before, sobra_before, step_allocs
+                ):
+                    lst.pop(0)
+                    trocas_ang_step += _record_cut_angle(p_next)
+                    _retire_dead_bars()
+                    continue
+
+                _retire_dead_bars()
+                if len(active_rack) >= rack_limit:
+                    if step_allocs:
+                        total_trocas_angulo_lote += trocas_ang_step
+                        _commit_step(
+                            cur_med,
+                            step_allocs,
+                            had_before,
+                            sobra_before,
+                            trocas_ang_step,
+                            eh_drenagem=False,
+                        )
+                        had_before = {}
+                        sobra_before = {}
+                        step_allocs = defaultdict(list)
+                        trocas_ang_step = 0
+                    _drain_rack()
+                    if cur_med not in rem_by_med or not rem_by_med[cur_med]:
+                        break
+                    rem_by_med[cur_med], _ = _order_pieces_by_angle(
+                        rem_by_med[cur_med],
+                        start_angle=route_prev_angle,
+                        keep_internal=True,
+                    )
+                    continue
+
+                # Abre barra nova e corta o máximo de peças `cur_med` que couberem nela
+                b_num = len(all_bars) + 1
+                new_bar = {
+                    "barra_numero": b_num,
+                    "consumido_util_um": 0,
+                    "soma_pecas_um": 0,
+                    "econ_um": 0,
+                    "pieces": [],
+                }
+                all_bars.append(new_bar)
+                had_before[b_num] = False
+                sobra_before[b_num] = max(0, L_um - D_um)
+
+                is_first_on_bar = True
+                while lst:
+                    p_cur = lst[0]
+                    if is_first_on_bar:
+                        ov_um = 0
+                        inc_um = p_cur["_c_um"]
+                    else:
+                        ov_um = _calc_pair_overlap_um(new_bar["pieces"][-1], p_cur)
+                        inc_um = p_cur["_c_um"] + K_um - ov_um
+                    if new_bar["consumido_util_um"] + inc_um <= usable_um:
+                        lst.pop(0)
+                        new_bar["consumido_util_um"] += inc_um
+                        new_bar["soma_pecas_um"] += p_cur["_c_um"]
+                        new_bar["econ_um"] += ov_um
+                        clean_p = {
+                            k: v for k, v in p_cur.items() if not k.startswith("_")
+                        }
+                        new_bar["pieces"].append(clean_p)
+                        step_allocs[b_num].append(clean_p)
+                        trocas_ang_step += _record_cut_angle(p_cur)
+                        is_first_on_bar = False
+                    else:
+                        break
+
+                active_rack.append(new_bar)
+                _retire_dead_bars()
+
+            if step_allocs:
+                total_trocas_angulo_lote += trocas_ang_step
+                _commit_step(
+                    cur_med,
+                    step_allocs,
+                    had_before,
+                    sobra_before,
+                    trocas_ang_step,
+                    eh_drenagem=False,
+                )
+            if cur_med in rem_by_med and not rem_by_med[cur_med]:
+                del rem_by_med[cur_med]
+
     bars: List[Dict[str, Any]] = []
-    for bar_state in open_bars:
+    for bar_state in all_bars:
         clean_pieces = list(bar_state["pieces"])
         b_dict = _build_bar_dict(
             "tempo_execucao",
@@ -1290,8 +1703,22 @@ def _build_tempo_execucao_group(
         bars.append(b_dict)
 
     _annotate_and_count_adjustments(bars, count_measure_adjustments=False)
-    ajustes_lote = max(0, len(roteiro_medidas) - 1)
-    return bars, roteiro_medidas, ajustes_lote, total_trocas_angulo_lote
+    ajustes_lote = sum(
+        1
+        for i in range(1, len(roteiro_medidas))
+        if roteiro_medidas[i]["medida_corte_mm"]
+        != roteiro_medidas[i - 1]["medida_corte_mm"]
+    )
+    retomadas_sobras, pico_sobras_simultaneas = _annotate_rack_lifecycle(
+        roteiro_medidas
+    )
+    rack_meta = {
+        "retomadas_sobras": retomadas_sobras,
+        "pico_sobras_simultaneas": pico_sobras_simultaneas,
+        "sobras_encerradas_limite": 0,
+        "ciclos_drenagem": ciclos_drenagem,
+    }
+    return bars, roteiro_medidas, ajustes_lote, total_trocas_angulo_lote, rack_meta
 
 
 def _calc_avg_yield_and_loss(
@@ -1311,6 +1738,7 @@ def _assemble_scenario_payload(
     grupos_out: List[Dict[str, Any]],
     barra_mm: float,
     include_roteiro: bool = False,
+    preserve_step_order: bool = False,
 ) -> Dict[str, Any]:
     grupos_sorted = sorted(
         grupos_out,
@@ -1347,6 +1775,17 @@ def _assemble_scenario_payload(
     total_econ_mm = round(sum(g.get("economia_chanfro_mm", 0.0) for g in grupos_sorted), 3)
     total_cortes_par = sum(g.get("cortes_paralelos_qtd", 0) for g in grupos_sorted)
     total_cortes_v = sum(g.get("cortes_v_qtd", 0) for g in grupos_sorted)
+    total_barras_complexas = sum(g.get("barras_complexas_qtd", 0) for g in grupos_sorted)
+    total_retomadas_sobras = sum(g.get("retomadas_sobras", 0) for g in grupos_sorted)
+    pico_sobras_simultaneas = max(
+        (g.get("pico_sobras_simultaneas", 0) for g in grupos_sorted), default=0
+    )
+    total_sobras_encerradas_limite = sum(
+        g.get("sobras_encerradas_limite", 0) for g in grupos_sorted
+    )
+    total_ciclos_drenagem = sum(
+        g.get("ciclos_drenagem", 0) for g in grupos_sorted
+    )
     soma_util_mm = max(0.0, round(soma_pecas_mm - total_econ_mm, 3))
     aproveitamento, perda_media = _calc_avg_yield_and_loss(
         soma_util_mm, total_perda_mm, total_barras, barra_mm
@@ -1368,6 +1807,11 @@ def _assemble_scenario_payload(
         "total_economia_chanfro_mm": total_econ_mm,
         "total_cortes_paralelos": total_cortes_par,
         "total_cortes_v": total_cortes_v,
+        "total_barras_complexas": total_barras_complexas,
+        "total_retomadas_sobras": total_retomadas_sobras,
+        "pico_sobras_simultaneas": pico_sobras_simultaneas,
+        "total_sobras_encerradas_limite": total_sobras_encerradas_limite,
+        "total_ciclos_drenagem": total_ciclos_drenagem,
     }
 
     payload: Dict[str, Any] = {
@@ -1384,9 +1828,12 @@ def _assemble_scenario_payload(
         for g in grupos_sorted:
             for step in g.get("roteiro_medidas", []):
                 roteiro_flat.append(step)
-        roteiro_flat.sort(
-            key=lambda s: (-s["medida_corte_mm"], s["grupo_nome"], s["passo"])
-        )
+        if preserve_step_order:
+            roteiro_flat.sort(key=lambda s: (s["grupo_nome"], s["passo"]))
+        else:
+            roteiro_flat.sort(
+                key=lambda s: (-s["medida_corte_mm"], s["grupo_nome"], s["passo"])
+            )
         payload["roteiro_flat"] = roteiro_flat
 
     return payload
@@ -1537,6 +1984,9 @@ def build_bar_optimization(
         mat_perda_mm = round(sum(b["perda_mm"] for b in mat_bars), 3)
         mat_par_qtd = sum(b["cortes_paralelos_qtd"] for b in mat_bars)
         mat_v_qtd = sum(b["cortes_v_qtd"] for b in mat_bars)
+        mat_complex_qtd = sum(
+            1 for b in mat_bars if b["medidas_distintas_barra"] >= 4
+        )
         mat_aprov, mat_perda_media = _calc_avg_yield_and_loss(
             mat_util_mm, mat_perda_mm, len(mat_bars), cfg.comprimento_barra_mm
         )
@@ -1571,13 +2021,18 @@ def build_bar_optimization(
                 "economia_chanfro_mm": mat_econ_mm,
                 "cortes_paralelos_qtd": mat_par_qtd,
                 "cortes_v_qtd": mat_v_qtd,
+                "barras_complexas_qtd": mat_complex_qtd,
+                "retomadas_sobras": 0,
+                "pico_sobras_simultaneas": 0,
+                "sobras_encerradas_limite": 0,
+                "ciclos_drenagem": 0,
                 "barras": mat_bars,
             }
         )
 
-        # Cenário 2: Tempo de Execução (Lote por Medida FFD Maior -> Menor)
-        tmp_bars, tmp_roteiro, tmp_adj, tmp_ang_adj = _build_tempo_execucao_group(
-            eligible, gm, cfg, L_um, D_um, K_um, cap_um
+        # Cenário 2: Tempo de Execução (Lote por Medida Maior -> Menor)
+        tmp_bars, tmp_roteiro, tmp_adj, tmp_ang_adj, tmp_rack_meta = (
+            _build_tempo_execucao_group(eligible, gm, cfg, L_um, D_um, K_um, cap_um)
         )
         tmp_soma_mm = round(sum(b["soma_pecas_mm"] for b in tmp_bars), 3)
         tmp_econ_mm = round(sum(b["economia_chanfro_mm"] for b in tmp_bars), 3)
@@ -1585,6 +2040,9 @@ def build_bar_optimization(
         tmp_perda_mm = round(sum(b["perda_mm"] for b in tmp_bars), 3)
         tmp_par_qtd = sum(b["cortes_paralelos_qtd"] for b in tmp_bars)
         tmp_v_qtd = sum(b["cortes_v_qtd"] for b in tmp_bars)
+        tmp_complex_qtd = sum(
+            1 for b in tmp_bars if b["medidas_distintas_barra"] >= 4
+        )
         tmp_aprov, tmp_perda_media = _calc_avg_yield_and_loss(
             tmp_util_mm, tmp_perda_mm, len(tmp_bars), cfg.comprimento_barra_mm
         )
@@ -1603,15 +2061,36 @@ def build_bar_optimization(
                 "economia_chanfro_mm": tmp_econ_mm,
                 "cortes_paralelos_qtd": tmp_par_qtd,
                 "cortes_v_qtd": tmp_v_qtd,
+                "barras_complexas_qtd": tmp_complex_qtd,
+                "retomadas_sobras": tmp_rack_meta["retomadas_sobras"],
+                "pico_sobras_simultaneas": tmp_rack_meta["pico_sobras_simultaneas"],
+                "sobras_encerradas_limite": tmp_rack_meta["sobras_encerradas_limite"],
+                "ciclos_drenagem": tmp_rack_meta["ciclos_drenagem"],
                 "barras": tmp_bars,
                 "roteiro_medidas": tmp_roteiro,
             }
         )
 
+    mat_desc = (
+        "Agrupa medidas iguais na mesma barra (serra manual, 0 sobras no cavalete) com menor perda possível."
+        if cfg.priorizar_mesma_medida
+        else "Menor número de barras e menor perda total, com encadeamento de medidas entre barras."
+    )
+    rack_cfg = (
+        int(cfg.limite_sobras_simultaneas)
+        if cfg.limite_sobras_simultaneas and int(cfg.limite_sobras_simultaneas) > 0
+        else None
+    )
+    tmp_desc = (
+        f"Corte em ondas por medida com drenagem automática do cavalete (máx. {rack_cfg} sobra(s) simultânea(s))."
+        if rack_cfg is not None
+        else "Corte em lote por medida da maior para a menor reaproveitando sobras (mínimo de ajustes)."
+    )
+
     cenario_material = _assemble_scenario_payload(
         "material",
         "Aproveitamento de Material",
-        "Menor número de barras e menor perda total, com encadeamento de medidas entre barras.",
+        mat_desc,
         grupos_material,
         cfg.comprimento_barra_mm,
         include_roteiro=False,
@@ -1619,10 +2098,11 @@ def build_bar_optimization(
     cenario_tempo = _assemble_scenario_payload(
         "tempo_execucao",
         "Tempo de Execução (Maior → Menor)",
-        "Corte em lote por medida da maior para a menor reaproveitando sobras (mínimo de ajustes).",
+        tmp_desc,
         grupos_tempo,
         cfg.comprimento_barra_mm,
         include_roteiro=True,
+        preserve_step_order=(rack_cfg is not None),
     )
 
     mat_r = cenario_material["resumo"]
@@ -1649,6 +2129,9 @@ def build_bar_optimization(
         "diferenca_economia_chanfro_mm_tempo_vs_material": round(
             tmp_r["total_economia_chanfro_mm"] - mat_r["total_economia_chanfro_mm"], 3
         ),
+        "pico_sobras_tempo": tmp_r["pico_sobras_simultaneas"],
+        "total_retomadas_tempo": tmp_r["total_retomadas_sobras"],
+        "barras_complexas_material": mat_r["total_barras_complexas"],
     }
 
     pecas_inviaveis_flat = sorted(

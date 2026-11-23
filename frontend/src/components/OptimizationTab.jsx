@@ -154,7 +154,8 @@ function filterScenarioAndComputeMetrics(
   grupoFilter,
   searchTerm,
   activeBarraMm,
-  pecasInviaveisFlat = []
+  pecasInviaveisFlat = [],
+  preserveStepOrder = false
 ) {
   if (!scenarioData) {
     return {
@@ -175,6 +176,11 @@ function filterScenarioAndComputeMetrics(
         totalEconomiaChanfroMm: 0,
         totalCortesParalelos: 0,
         totalCortesV: 0,
+        totalBarrasComplexas: 0,
+        totalRetomadasSobras: 0,
+        picoSobrasSimultaneas: 0,
+        totalSobrasEncerradasLimite: 0,
+        totalCiclosDrenagem: 0,
         gruposExibidos: 0,
         totalGrupos: 0,
         pecasInviaveis: 0,
@@ -199,6 +205,10 @@ function filterScenarioAndComputeMetrics(
     let visBars = rawVisBars;
     let groupAjustes = 0;
     let groupTrocasAngulo = 0;
+    let groupRetomadas = 0;
+    let groupPicoSobras = 0;
+    let groupEncerradasLimite = 0;
+    let groupCiclosDrenagem = 0;
     let visRoteiro = [];
 
     if (scenarioId === "material") {
@@ -249,7 +259,7 @@ function filterScenarioAndComputeMetrics(
         visBars = reTmp.annotated;
         let curRouteAngle = null;
         let sumStepAng = 0;
-        visRoteiro = visRoteiro.map((step, sIdx) => {
+        visRoteiro = visRoteiro.map((step, sIdx, arr) => {
           let stepAngChanges = 0;
           for (const alloc of step.alocacoes || []) {
             for (const p of alloc.pecas || []) {
@@ -267,18 +277,54 @@ function filterScenarioAndComputeMetrics(
           return {
             ...step,
             passo: sIdx + 1,
-            troca_medida: sIdx > 0,
+            troca_medida:
+              sIdx > 0 && step.medida_corte_mm !== arr[sIdx - 1].medida_corte_mm,
             troca_angulo: stepAngChanges > 0,
             trocas_angulo_passo: stepAngChanges,
           };
         });
-        groupAjustes = Math.max(0, visRoteiro.length - 1);
+        groupAjustes = visRoteiro.reduce(
+          (acc, s, i, arr) =>
+            acc + (i > 0 && s.medida_corte_mm !== arr[i - 1].medida_corte_mm ? 1 : 0),
+          0
+        );
         groupTrocasAngulo = sumStepAng;
+        const barSteps = new Map();
+        for (const step of visRoteiro) {
+          for (const alloc of step.alocacoes || []) {
+            if (alloc.eh_sobra) {
+              groupRetomadas += 1;
+            }
+            const list = barSteps.get(alloc.barra_numero) || [];
+            list.push(step.passo);
+            barSteps.set(alloc.barra_numero, list);
+          }
+        }
+        for (let pIdx = 1; pIdx <= visRoteiro.length; pIdx++) {
+          let wip = 0;
+          for (const stepsArr of barSteps.values()) {
+            const minS = Math.min(...stepsArr);
+            const maxS = Math.max(...stepsArr);
+            if (minS < pIdx && pIdx <= maxS) wip += 1;
+          }
+          if (wip > groupPicoSobras) groupPicoSobras = wip;
+        }
+        groupCiclosDrenagem = Number(g.ciclos_drenagem) || 0;
       } else {
         groupAjustes = Number(g.ajustes_corte) || 0;
         groupTrocasAngulo = Number(g.trocas_angulo) || 0;
+        groupRetomadas = Number(g.retomadas_sobras) || 0;
+        groupPicoSobras = Number(g.pico_sobras_simultaneas) || 0;
+        groupEncerradasLimite = Number(g.sobras_encerradas_limite) || 0;
+        groupCiclosDrenagem = Number(g.ciclos_drenagem) || 0;
       }
     }
+
+    const barrasComplexas = visBars.filter(
+      (b) =>
+        (Number(b.medidas_distintas_barra) ||
+          new Set((b.pecas || []).map((p) => p.medida_corte_mm)).size) >= 4
+    ).length;
 
     const somaPecasMm = visBars.reduce(
       (acc, b) => acc + (Number(b.soma_pecas_mm) || 0),
@@ -314,6 +360,11 @@ function filterScenarioAndComputeMetrics(
       economia_chanfro_mm: Math.round(econChanfroMm * 1000) / 1000,
       cortes_paralelos_qtd: cortesParalelos,
       cortes_v_qtd: cortesV,
+      barras_complexas_qtd: barrasComplexas,
+      retomadas_sobras: groupRetomadas,
+      pico_sobras_simultaneas: groupPicoSobras,
+      sobras_encerradas_limite: groupEncerradasLimite,
+      ciclos_drenagem: groupCiclosDrenagem,
       total_perda_mm: Math.round(perdaMm * 1000) / 1000,
       total_perda_metros: Math.round(perdaMm) / 1000,
       perda_media_barra_mm: Math.round(perdaMediaMm * 100) / 100,
@@ -335,8 +386,10 @@ function filterScenarioAndComputeMetrics(
   });
 
   filteredRoteiroFlat.sort((a, b) => {
-    const diffMed = (Number(b.medida_corte_mm) || 0) - (Number(a.medida_corte_mm) || 0);
-    if (diffMed !== 0) return diffMed;
+    if (!preserveStepOrder) {
+      const diffMed = (Number(b.medida_corte_mm) || 0) - (Number(a.medida_corte_mm) || 0);
+      if (diffMed !== 0) return diffMed;
+    }
     const cmp = String(a.grupo_nome || "").localeCompare(String(b.grupo_nome || ""), "pt-BR");
     if (cmp !== 0) return cmp;
     return (Number(a.passo) || 0) - (Number(b.passo) || 0);
@@ -380,6 +433,26 @@ function filterScenarioAndComputeMetrics(
     (acc, g) => acc + (g.trocas_angulo || 0),
     0
   );
+  const totalBarrasComplexas = filteredGroups.reduce(
+    (acc, g) => acc + (g.barras_complexas_qtd || 0),
+    0
+  );
+  const totalRetomadasSobras = filteredGroups.reduce(
+    (acc, g) => acc + (g.retomadas_sobras || 0),
+    0
+  );
+  const picoSobrasSimultaneas = filteredGroups.reduce(
+    (acc, g) => Math.max(acc, g.pico_sobras_simultaneas || 0),
+    0
+  );
+  const totalSobrasEncerradasLimite = filteredGroups.reduce(
+    (acc, g) => acc + (g.sobras_encerradas_limite || 0),
+    0
+  );
+  const totalCiclosDrenagem = filteredGroups.reduce(
+    (acc, g) => acc + (g.ciclos_drenagem || 0),
+    0
+  );
   const aproveitamentoMedioPct =
     totalBarras > 0 && activeBarraMm > 0
       ? Math.round(Math.min(100, (somaUtilMm / (totalBarras * activeBarraMm)) * 100) * 100) / 100
@@ -405,6 +478,11 @@ function filterScenarioAndComputeMetrics(
       totalEconomiaChanfroMm: Math.round(totalEconomiaChanfroMm * 1000) / 1000,
       totalCortesParalelos,
       totalCortesV,
+      totalBarrasComplexas,
+      totalRetomadasSobras,
+      picoSobrasSimultaneas,
+      totalSobrasEncerradasLimite,
+      totalCiclosDrenagem,
       gruposExibidos: filteredGroups.length,
       totalGrupos: allGroups.length,
       pecasInviaveis: filteredInviaveis.length,
@@ -967,6 +1045,7 @@ function ExecutionRouteTable({
             <th>Origem na Barra</th>
             <th className="num-header">Qtd Cortes</th>
             <th className="num-header">Sobra Antes → Depois (mm)</th>
+            <th>Ação / Cavalete</th>
             <th>OPs</th>
           </tr>
         </thead>
@@ -975,6 +1054,12 @@ function ExecutionRouteTable({
             const barNumDisplay = showGroupCol
               ? alloc.barra_global_numero || alloc.barra_numero
               : alloc.barra_numero;
+            const acaoBadgeCls =
+              alloc.vaga_cavalete && !alloc.eh_fim_barra
+                ? "border-lider-wood/40 bg-lider-wood/10 text-lider-wood"
+                : alloc.vaga_cavalete && alloc.eh_fim_barra
+                ? "border-lider-charcoal/30 bg-lider-canvas text-lider-charcoal"
+                : "border-lider-border bg-lider-canvas/60 text-lider-muted";
             return (
               <tr
                 key={`${step.grupo_key}-${step.passo}-${alloc.barra_numero}-${idx}`}
@@ -982,6 +1067,11 @@ function ExecutionRouteTable({
                 <th scope="row" data-label="Passo" className="font-mono text-xs">
                   <div className="inline-flex flex-wrap items-center gap-1.5">
                     <span>#{step.passo}</span>
+                    {step.eh_drenagem && (
+                      <span className="inline-flex items-center px-1.5 py-0.5 text-[10px] border border-lider-charcoal/30 bg-lider-charcoal/5 text-lider-charcoal rounded-[2px]">
+                        Drenagem
+                      </span>
+                    )}
                     {step.troca_medida && (
                       <span className="inline-flex items-center px-1.5 py-0.5 text-[10px] border border-lider-wood/40 bg-lider-wood/5 text-lider-wood rounded-[2px]">
                         Troca
@@ -1023,6 +1113,7 @@ function ExecutionRouteTable({
                   {alloc.eh_sobra ? (
                     <span className="inline-flex items-center px-2 py-0.5 text-[11px] font-medium border border-lider-wood/40 bg-lider-wood/10 text-lider-wood rounded-[2px]">
                       Sobra da Barra #{barNumDisplay}
+                      {alloc.vaga_cavalete ? ` · Vaga #${alloc.vaga_cavalete}` : ""}
                     </span>
                   ) : (
                     <span className="inline-flex items-center px-2 py-0.5 text-[11px] font-medium bg-lider-charcoal text-white rounded-[2px]">
@@ -1041,6 +1132,13 @@ function ExecutionRouteTable({
                   <strong className="font-medium text-lider-ink">
                     {fmtNum(alloc.sobra_depois_mm)}
                   </strong>
+                </td>
+                <td data-label="Ação / Cavalete" className="whitespace-nowrap">
+                  <span
+                    className={`inline-flex items-center px-2 py-0.5 text-[11px] border rounded-[2px] ${acaoBadgeCls}`}
+                  >
+                    {alloc.acao_cavalete || (alloc.eh_sobra ? "Sobra" : "—")}
+                  </span>
                 </td>
                 <td data-label="OPs" className="font-mono text-xs text-lider-slate">
                   {alloc.ops || "-"}
@@ -1068,6 +1166,8 @@ export default function OptimizationTab({
     espessura_serra_mm: 0,
     desponte_mm: 0,
     separar_por_acabamento: false,
+    priorizar_mesma_medida: false,
+    limite_sobras_simultaneas: null,
   };
 
   const [barraMm, setBarraMm] = useState(
@@ -1082,6 +1182,14 @@ export default function OptimizationTab({
   const [separarAcabamento, setSepararAcabamento] = useState(
     Boolean(effectiveConfig.separar_por_acabamento)
   );
+  const [priorizarMesmaMedida, setPriorizarMesmaMedida] = useState(
+    Boolean(effectiveConfig.priorizar_mesma_medida)
+  );
+  const [limiteSobras, setLimiteSobras] = useState(
+    effectiveConfig.limite_sobras_simultaneas != null
+      ? String(effectiveConfig.limite_sobras_simultaneas)
+      : ""
+  );
   const [errors, setErrors] = useState({});
 
   const [activeScenario, setActiveScenario] = useState("material");
@@ -1095,6 +1203,7 @@ export default function OptimizationTab({
   const barraRef = useRef(null);
   const serraRef = useRef(null);
   const desponteRef = useRef(null);
+  const limiteSobrasRef = useRef(null);
 
   useEffect(() => {
     const src = config || optimization?.config;
@@ -1103,13 +1212,20 @@ export default function OptimizationTab({
     setSerraMm(String(src.espessura_serra_mm ?? 0));
     setDesponteMm(String(src.desponte_mm ?? 0));
     setSepararAcabamento(Boolean(src.separar_por_acabamento));
+    setPriorizarMesmaMedida(Boolean(src.priorizar_mesma_medida));
+    setLimiteSobras(
+      src.limite_sobras_simultaneas != null
+        ? String(src.limite_sobras_simultaneas)
+        : ""
+    );
     setErrors({});
   }, [config, optimization?.config]);
 
   const validateFields = (
     bVal = barraMm,
     sVal = serraMm,
-    dVal = desponteMm
+    dVal = desponteMm,
+    lVal = limiteSobras
   ) => {
     const nextErrors = {};
     const bNum = Number(bVal);
@@ -1125,7 +1241,18 @@ export default function OptimizationTab({
     if (!Number.isFinite(dNum) || dNum < 0 || (Number.isFinite(bNum) && dNum >= bNum)) {
       nextErrors.desponteMm = "Desponte deve ser >= 0 e menor que a barra.";
     }
-    return { nextErrors, parsed: { bNum, sNum, dNum } };
+
+    const lTrim = String(lVal ?? "").trim();
+    let lNum = null;
+    if (lTrim !== "") {
+      if (!/^\d+$/.test(lTrim) || parseInt(lTrim, 10) < 1) {
+        nextErrors.limiteSobras = "Use inteiro >= 1 ou deixe vazio.";
+      } else {
+        lNum = parseInt(lTrim, 10);
+      }
+    }
+
+    return { nextErrors, parsed: { bNum, sNum, dNum, lNum } };
   };
 
   const handleSubmit = (e) => {
@@ -1136,6 +1263,7 @@ export default function OptimizationTab({
       if (nextErrors.barraMm) barraRef.current?.focus();
       else if (nextErrors.serraMm) serraRef.current?.focus();
       else if (nextErrors.desponteMm) desponteRef.current?.focus();
+      else if (nextErrors.limiteSobras) limiteSobrasRef.current?.focus();
       return;
     }
 
@@ -1144,11 +1272,18 @@ export default function OptimizationTab({
       espessura_serra_mm: parsed.sNum,
       desponte_mm: parsed.dNum,
       separar_por_acabamento: separarAcabamento,
+      priorizar_mesma_medida: priorizarMesmaMedida,
+      limite_sobras_simultaneas: parsed.lNum,
     });
   };
 
   const activeBarraMm = Number(optimization?.config?.comprimento_barra_mm ?? 6000);
   const activeDesponteMm = Number(optimization?.config?.desponte_mm ?? 0);
+  const activePriorizarMesmaMedida = Boolean(
+    optimization?.config?.priorizar_mesma_medida
+  );
+  const activeLimiteSobras =
+    optimization?.config?.limite_sobras_simultaneas ?? null;
   const cenarios = optimization?.cenarios;
   const pecasInviaveisFlat = optimization?.pecas_inviaveis_flat || [];
 
@@ -1178,9 +1313,17 @@ export default function OptimizationTab({
         grupoFilter,
         searchTerm,
         activeBarraMm,
-        pecasInviaveisFlat
+        pecasInviaveisFlat,
+        Boolean(activeLimiteSobras != null)
       ),
-    [cenarios?.tempo_execucao, grupoFilter, searchTerm, activeBarraMm, pecasInviaveisFlat]
+    [
+      cenarios?.tempo_execucao,
+      grupoFilter,
+      searchTerm,
+      activeBarraMm,
+      pecasInviaveisFlat,
+      activeLimiteSobras,
+    ]
   );
 
   const activeView = activeScenario === "material" ? materialView : tempoView;
@@ -1420,22 +1563,48 @@ export default function OptimizationTab({
             </p>
           </div>
 
-          {/* Separar por acabamento */}
-          <div className="flex items-center lg:pt-6">
-            <input
-              id={`${uid}-acab`}
-              name="separar_por_acabamento"
-              type="checkbox"
-              checked={separarAcabamento}
-              onChange={(e) => setSepararAcabamento(e.target.checked)}
-              className="w-4 h-4 rounded-[2px] border-lider-border text-lider-wood focus:ring-lider-wood cursor-pointer shrink-0"
-            />
+          {/* Cavalete Sobras (máx.) */}
+          <div className="space-y-1">
             <label
-              htmlFor={`${uid}-acab`}
-              className="ml-2 text-xs text-lider-ink cursor-pointer select-none leading-snug"
+              htmlFor={`${uid}-cavalete`}
+              className="block text-[11px] uppercase tracking-[0.06em] text-lider-slate"
             >
-              Separar por acabamento
+              Cavalete Sobras (máx.)
             </label>
+            <input
+              ref={limiteSobrasRef}
+              id={`${uid}-cavalete`}
+              name="limite_sobras_simultaneas"
+              type="text"
+              inputMode="numeric"
+              placeholder="Ilimitado"
+              value={limiteSobras}
+              onChange={(e) => {
+                setLimiteSobras(e.target.value);
+                if (errors.limiteSobras) {
+                  setErrors((prev) => ({ ...prev, limiteSobras: undefined }));
+                }
+              }}
+              onBlur={() => {
+                const { nextErrors } = validateFields();
+                setErrors((prev) => ({ ...prev, limiteSobras: nextErrors.limiteSobras }));
+              }}
+              aria-invalid={errors.limiteSobras ? "true" : undefined}
+              aria-describedby={`${uid}-cavalete-help`}
+              className={`${inputBaseCls} ${
+                errors.limiteSobras
+                  ? "border-red-700 focus:border-red-700"
+                  : "border-lider-border focus:border-lider-charcoal"
+              }`}
+            />
+            <p
+              id={`${uid}-cavalete-help`}
+              className={`text-[11px] ${
+                errors.limiteSobras ? "text-red-700" : "text-lider-muted"
+              }`}
+            >
+              {errors.limiteSobras || "Vazio = ilimitado · Ex.: 3 a 5 (Tempo)"}
+            </p>
           </div>
 
           {/* Botão Otimizar */}
@@ -1452,6 +1621,46 @@ export default function OptimizationTab({
               )}
               <span>Otimizar Barras</span>
             </button>
+          </div>
+        </div>
+
+        {/* Opções operacionais de agrupamento e serra manual */}
+        <div className="flex flex-wrap items-center gap-x-6 gap-y-2.5 pt-3 border-t border-lider-border/70">
+          <div className="flex items-center">
+            <input
+              id={`${uid}-acab`}
+              name="separar_por_acabamento"
+              type="checkbox"
+              checked={separarAcabamento}
+              onChange={(e) => setSepararAcabamento(e.target.checked)}
+              className="w-4 h-4 rounded-[2px] border-lider-border text-lider-wood focus:ring-lider-wood cursor-pointer shrink-0"
+            />
+            <label
+              htmlFor={`${uid}-acab`}
+              className="ml-2 text-xs text-lider-ink cursor-pointer select-none leading-snug"
+            >
+              Separar por acabamento
+            </label>
+          </div>
+
+          <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+            <input
+              id={`${uid}-mesma-medida`}
+              name="priorizar_mesma_medida"
+              type="checkbox"
+              checked={priorizarMesmaMedida}
+              onChange={(e) => setPriorizarMesmaMedida(e.target.checked)}
+              className="w-4 h-4 rounded-[2px] border-lider-border text-lider-wood focus:ring-lider-wood cursor-pointer shrink-0"
+            />
+            <label
+              htmlFor={`${uid}-mesma-medida`}
+              className="text-xs text-lider-ink cursor-pointer select-none leading-snug"
+            >
+              Priorizar mesma medida por barra (Serra manual · 0 sobras)
+            </label>
+            <span className="text-[11px] text-lider-muted">
+              (agrupa peças iguais no Cenário 1 reduzindo trocas de batente)
+            </span>
           </div>
         </div>
       </form>
@@ -1490,45 +1699,60 @@ export default function OptimizationTab({
                       className="mt-0.5 text-lider-charcoal focus:ring-lider-charcoal"
                     />
                     <div>
-                      <span className="font-display font-medium text-sm text-lider-ink block">
-                        Cenário 1 — Aproveitamento de Material
-                      </span>
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span className="font-display font-medium text-sm text-lider-ink">
+                          Cenário 1 — Aproveitamento de Material
+                        </span>
+                        {activePriorizarMesmaMedida && (
+                          <span className="inline-flex items-center px-1.5 py-0.5 text-[10px] font-medium border border-lider-charcoal/30 bg-lider-charcoal/5 text-lider-charcoal rounded-[2px]">
+                            Serra manual · Mesma medida 1º
+                          </span>
+                        )}
+                      </div>
                       <span className="text-xs text-lider-slate">
-                        Menor consumo de barras {barraMetrosLabel}m com encadeamento de medidas entre barras.
+                        {activePriorizarMesmaMedida
+                          ? `Agrupa medidas iguais nas barras ${barraMetrosLabel}m (0 sobras no cavalete, menos ajustes manuais).`
+                          : `Menor consumo de barras ${barraMetrosLabel}m com encadeamento de medidas entre barras.`}
                       </span>
                     </div>
                   </div>
                   <Scissors className="w-4 h-4 text-lider-wood shrink-0 mt-0.5" strokeWidth={1.5} />
                 </div>
 
-                <div className="grid grid-cols-4 gap-2 pt-2 border-t border-lider-border text-xs tabular-nums">
-                  <div>
-                    <span className="block text-[10px] uppercase text-lider-muted">Barras</span>
-                    <strong className="font-medium text-lider-ink text-sm">
-                      {mMat.totalBarras}
-                    </strong>
+                <div className="space-y-2">
+                  <div className="grid grid-cols-4 gap-2 pt-2 border-t border-lider-border text-xs tabular-nums">
+                    <div>
+                      <span className="block text-[10px] uppercase text-lider-muted">Barras</span>
+                      <strong className="font-medium text-lider-ink text-sm">
+                        {mMat.totalBarras}
+                      </strong>
+                    </div>
+                    <div>
+                      <span className="block text-[10px] uppercase text-lider-muted">Aproveit.</span>
+                      <strong className="font-medium text-lider-wood text-sm">
+                        {fmtNum(mMat.aproveitamentoMedioPct)}%
+                      </strong>
+                    </div>
+                    <div>
+                      <span className="block text-[10px] uppercase text-lider-muted">Perda</span>
+                      <strong className="font-medium text-lider-ink text-sm">
+                        {fmtNum(mMat.totalPerdaMetros)} m
+                      </strong>
+                    </div>
+                    <div>
+                      <span className="block text-[10px] uppercase text-lider-muted">Ajustes</span>
+                      <strong className="font-medium text-lider-ink text-sm">
+                        {mMat.totalAjustes}
+                      </strong>
+                      <span className="block text-[10px] text-lider-muted">
+                        {mMat.totalTrocasAngulo} âng.
+                      </span>
+                    </div>
                   </div>
-                  <div>
-                    <span className="block text-[10px] uppercase text-lider-muted">Aproveit.</span>
-                    <strong className="font-medium text-lider-wood text-sm">
-                      {fmtNum(mMat.aproveitamentoMedioPct)}%
-                    </strong>
-                  </div>
-                  <div>
-                    <span className="block text-[10px] uppercase text-lider-muted">Perda</span>
-                    <strong className="font-medium text-lider-ink text-sm">
-                      {fmtNum(mMat.totalPerdaMetros)} m
-                    </strong>
-                  </div>
-                  <div>
-                    <span className="block text-[10px] uppercase text-lider-muted">Ajustes</span>
-                    <strong className="font-medium text-lider-ink text-sm">
-                      {mMat.totalAjustes}
-                    </strong>
-                    <span className="block text-[10px] text-lider-muted">
-                      {mMat.totalTrocasAngulo} âng.
-                    </span>
-                  </div>
+                  <p className="text-[11px] text-lider-slate pt-1.5 border-t border-lider-border/60 tabular-nums">
+                    Cavalete: 0 sobras · 0 retomadas · {mMat.totalBarrasComplexas}{" "}
+                    {mMat.totalBarrasComplexas === 1 ? "barra" : "barras"} c/ 4+ med.
+                  </p>
                 </div>
               </label>
 
@@ -1558,6 +1782,11 @@ export default function OptimizationTab({
                         <span className="font-display font-medium text-sm text-lider-ink">
                           Cenário 2 — Tempo de Execução (Maior → Menor)
                         </span>
+                        {activeLimiteSobras != null && (
+                          <span className="inline-flex items-center px-1.5 py-0.5 text-[10px] font-medium border border-lider-terracotta/40 bg-lider-terracotta/10 text-lider-terracotta rounded-[2px]">
+                            Cavalete ≤ {activeLimiteSobras}
+                          </span>
+                        )}
                         {diffAdjTmpVsMat > 0 && (
                           <span className="inline-flex items-center px-1.5 py-0.5 text-[10px] font-medium border border-lider-wood/40 bg-lider-wood/10 text-lider-wood rounded-[2px]">
                             −{fmtNum(reducaoAdjPct)}% trocas
@@ -1565,48 +1794,63 @@ export default function OptimizationTab({
                         )}
                       </div>
                       <span className="text-xs text-lider-slate">
-                        Corte em lote por medida reaproveitando barras semi-cortadas (mínimo de ajustes).
+                        {activeLimiteSobras != null
+                          ? `Corte em ondas por medida com drenagem automática do cavalete (máx. ${activeLimiteSobras} sobra(s) simultânea(s)).`
+                          : "Corte em lote por medida reaproveitando barras semi-cortadas (mínimo de ajustes)."}
                       </span>
                     </div>
                   </div>
                   <Clock className="w-4 h-4 text-lider-wood shrink-0 mt-0.5" strokeWidth={1.5} />
                 </div>
 
-                <div className="grid grid-cols-4 gap-2 pt-2 border-t border-lider-border text-xs tabular-nums">
-                  <div>
-                    <span className="block text-[10px] uppercase text-lider-muted">Barras</span>
-                    <strong className="font-medium text-lider-ink text-sm">
-                      {mTmp.totalBarras}
-                    </strong>{" "}
-                    <span className="text-[11px] text-lider-muted">
-                      {diffBarsTmpVsMat === 0
-                        ? "(=)"
-                        : diffBarsTmpVsMat > 0
-                        ? `(+${diffBarsTmpVsMat})`
-                        : `(${diffBarsTmpVsMat})`}
-                    </span>
+                <div className="space-y-2">
+                  <div className="grid grid-cols-4 gap-2 pt-2 border-t border-lider-border text-xs tabular-nums">
+                    <div>
+                      <span className="block text-[10px] uppercase text-lider-muted">Barras</span>
+                      <strong className="font-medium text-lider-ink text-sm">
+                        {mTmp.totalBarras}
+                      </strong>{" "}
+                      <span className="text-[11px] text-lider-muted">
+                        {diffBarsTmpVsMat === 0
+                          ? "(=)"
+                          : diffBarsTmpVsMat > 0
+                          ? `(+${diffBarsTmpVsMat})`
+                          : `(${diffBarsTmpVsMat})`}
+                      </span>
+                    </div>
+                    <div>
+                      <span className="block text-[10px] uppercase text-lider-muted">Aproveit.</span>
+                      <strong className="font-medium text-lider-wood text-sm">
+                        {fmtNum(mTmp.aproveitamentoMedioPct)}%
+                      </strong>
+                    </div>
+                    <div>
+                      <span className="block text-[10px] uppercase text-lider-muted">Perda</span>
+                      <strong className="font-medium text-lider-ink text-sm">
+                        {fmtNum(mTmp.totalPerdaMetros)} m
+                      </strong>
+                    </div>
+                    <div>
+                      <span className="block text-[10px] uppercase text-lider-muted">Ajustes</span>
+                      <strong className="font-medium text-lider-wood text-sm">
+                        {mTmp.totalAjustes}
+                      </strong>
+                      <span className="block text-[10px] text-lider-muted">
+                        {mTmp.totalTrocasAngulo} âng.
+                      </span>
+                    </div>
                   </div>
-                  <div>
-                    <span className="block text-[10px] uppercase text-lider-muted">Aproveit.</span>
-                    <strong className="font-medium text-lider-wood text-sm">
-                      {fmtNum(mTmp.aproveitamentoMedioPct)}%
-                    </strong>
-                  </div>
-                  <div>
-                    <span className="block text-[10px] uppercase text-lider-muted">Perda</span>
-                    <strong className="font-medium text-lider-ink text-sm">
-                      {fmtNum(mTmp.totalPerdaMetros)} m
-                    </strong>
-                  </div>
-                  <div>
-                    <span className="block text-[10px] uppercase text-lider-muted">Ajustes</span>
-                    <strong className="font-medium text-lider-wood text-sm">
-                      {mTmp.totalAjustes}
-                    </strong>
-                    <span className="block text-[10px] text-lider-muted">
-                      {mTmp.totalTrocasAngulo} âng.
-                    </span>
-                  </div>
+                  <p className="text-[11px] text-lider-slate pt-1.5 border-t border-lider-border/60 tabular-nums">
+                    Cavalete: pico {mTmp.picoSobrasSimultaneas}{" "}
+                    {mTmp.picoSobrasSimultaneas === 1 ? "sobra" : "sobras"} ·{" "}
+                    {mTmp.totalRetomadasSobras}{" "}
+                    {mTmp.totalRetomadasSobras === 1 ? "retomada" : "retomadas"}
+                    {mTmp.totalCiclosDrenagem > 0
+                      ? ` · ${mTmp.totalCiclosDrenagem} onda(s) de drenagem`
+                      : mTmp.totalSobrasEncerradasLimite > 0
+                      ? ` · ${mTmp.totalSobrasEncerradasLimite} encerrada(s) p/ limite`
+                      : ""}
+                  </p>
                 </div>
               </label>
             </div>
@@ -2081,6 +2325,14 @@ export default function OptimizationTab({
                                 Econ. //: {fmtNum(g.economia_chanfro_mm)} mm
                               </span>
                             )}
+                            {activeScenario === "tempo_execucao" &&
+                              ((g.pico_sobras_simultaneas || 0) > 0 ||
+                                (g.retomadas_sobras || 0) > 0) && (
+                                <span className="inline-flex items-center px-2 py-0.5 border border-lider-wood/40 bg-lider-wood/10 text-lider-wood rounded-[2px]">
+                                  Cavalete: pico {g.pico_sobras_simultaneas || 0} ·{" "}
+                                  {g.retomadas_sobras || 0} retom.
+                                </span>
+                              )}
                             <span className="inline-flex items-center px-2 py-0.5 border border-lider-terracotta/40 bg-lider-terracotta/5 text-lider-terracotta rounded-[2px]">
                               {g.ajustes_corte}{" "}
                               {g.ajustes_corte === 1 ? "ajuste" : "ajustes"} ·{" "}
@@ -2096,12 +2348,18 @@ export default function OptimizationTab({
                             {activeScenario === "material"
                               ? `Sequência Encadeada — Aproveitamento de Material (${g.qtd_barras} barras)`
                               : tempoDisplayMode === "roteiro"
-                              ? `Roteiro de Execução por Medida — Maior → Menor (${g.roteiro_medidas?.length ?? 0} passos)`
+                              ? activeLimiteSobras != null
+                                ? `Roteiro em Ondas (Cavalete ≤ ${activeLimiteSobras}) — ${g.roteiro_medidas?.length ?? 0} passos`
+                                : `Roteiro de Execução por Medida — Maior → Menor (${g.roteiro_medidas?.length ?? 0} passos)`
                               : `Mapa Visual 1D — Corte em Lote FFD (${g.qtd_barras} barras)`}
                           </h4>
                           <span className="text-xs text-lider-slate tabular-nums">
                             {g.total_pecas_alocadas} peças · {fmtNum(g.total_metros_pecas)} m ·{" "}
                             {g.ajustes_corte} troca(s) de medida · {g.trocas_angulo || 0} troca(s) de ângulo
+                            {activeScenario === "material" &&
+                            (g.barras_complexas_qtd || 0) > 0
+                              ? ` · ${g.barras_complexas_qtd} barra(s) c/ 4+ med.`
+                              : ""}
                           </span>
                         </div>
 
@@ -2140,7 +2398,9 @@ export default function OptimizationTab({
                   {activeScenario === "material"
                     ? `Todas as Barras — Cenário Material (${activeView.filteredBarsFlat.length} barras)`
                     : tempoDisplayMode === "roteiro"
-                    ? `Roteiro Consolidado por Medida — Maior → Menor (${activeView.filteredRoteiroFlat.length} passos)`
+                    ? activeLimiteSobras != null
+                      ? `Roteiro Consolidado em Ondas (Cavalete ≤ ${activeLimiteSobras}) — ${activeView.filteredRoteiroFlat.length} passos`
+                      : `Roteiro Consolidado por Medida — Maior → Menor (${activeView.filteredRoteiroFlat.length} passos)`
                     : `Todas as Barras — Cenário Tempo de Execução (${activeView.filteredBarsFlat.length} barras)`}
                 </h4>
                 <span className="text-xs text-lider-slate tabular-nums">

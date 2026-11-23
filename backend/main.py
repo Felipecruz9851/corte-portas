@@ -126,6 +126,8 @@ class OptimizeBarsRequest(BaseModel):
     espessura_serra_mm: float = Field(default=0.0, ge=0)
     desponte_mm: float = Field(default=0.0, ge=0)
     separar_por_acabamento: bool = False
+    priorizar_mesma_medida: bool = False
+    limite_sobras_simultaneas: Optional[int] = Field(default=None, ge=1)
     perda_maxima_mm: Optional[float] = Field(default=None, ge=0)
     detailed_bars: Optional[List[Dict[str, Any]]] = None
 
@@ -379,6 +381,8 @@ def optimize_bars(req: OptimizeBarsRequest) -> Dict[str, Any]:
         espessura_serra_mm=req.espessura_serra_mm,
         desponte_mm=req.desponte_mm,
         separar_por_acabamento=req.separar_por_acabamento,
+        priorizar_mesma_medida=req.priorizar_mesma_medida,
+        limite_sobras_simultaneas=req.limite_sobras_simultaneas,
     )
     STORE.optimization_config = config
 

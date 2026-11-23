@@ -56,6 +56,8 @@ export default function App() {
     espessura_serra_mm: 0,
     desponte_mm: 0,
     separar_por_acabamento: false,
+    priorizar_mesma_medida: false,
+    limite_sobras_simultaneas: null,
   });
   const [exportingKey, setExportingKey] = useState(null);
   const [status, setStatus] = useState({
@@ -406,8 +408,9 @@ export default function App() {
       setPayload((prev) => (prev ? { ...prev, otimizacao_barras: result } : prev));
       const matR = result?.cenarios?.material?.resumo || {};
       const tmpR = result?.cenarios?.tempo_execucao?.resumo || {};
+      const picoCavalete = tmpR.pico_sobras_simultaneas ?? 0;
       setStatus({
-        message: `Otimização concluída: Material ${matR.total_barras ?? 0} barra(s) (${matR.aproveitamento_medio_pct ?? 0}% · ${matR.total_ajustes_corte ?? 0} ajustes) | Tempo ${tmpR.total_barras ?? 0} barra(s) (${tmpR.total_ajustes_corte ?? 0} ajustes).`,
+        message: `Otimização concluída: Material ${matR.total_barras ?? 0} barra(s) (${matR.aproveitamento_medio_pct ?? 0}% · ${matR.total_ajustes_corte ?? 0} ajustes) | Tempo ${tmpR.total_barras ?? 0} barra(s) (${tmpR.total_ajustes_corte ?? 0} ajustes · pico ${picoCavalete} sobra(s)).`,
         kind: "ok",
       });
     } catch (err) {

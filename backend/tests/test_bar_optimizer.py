@@ -589,6 +589,209 @@ class TestBarOptimizer(unittest.TestCase):
         self.assertIn("Material_Economia_Chanfro_mm", cmp_headers)
         self.assertIn("Tempo_Economia_Chanfro_mm", cmp_headers)
 
+    def test_material_priorizar_mesma_medida_reduces_adjustments_and_complexity(self) -> None:
+        # Lote onde o empacotamento ótimo mistura várias medidas por barra,
+        # enquanto priorizar_mesma_medida agrupa medidas iguais e reduz ajustes/complexidade.
+        bars = [
+            _make_bar(2600.0, op="1", qtd=2),
+            _make_bar(2500.0, op="2", qtd=2),
+            _make_bar(1600.0, op="3", qtd=3),
+            _make_bar(1100.0, op="4", qtd=3),
+            _make_bar(900.0, op="5", qtd=4),
+            _make_bar(750.0, op="6", qtd=4),
+            _make_bar(550.0, op="7", qtd=4),
+        ]
+        res_default = build_bar_optimization(
+            bars,
+            OptimizationConfig(comprimento_barra_mm=6000.0, priorizar_mesma_medida=False),
+            self.rules,
+        )
+        res_manual = build_bar_optimization(
+            bars,
+            OptimizationConfig(comprimento_barra_mm=6000.0, priorizar_mesma_medida=True),
+            self.rules,
+        )
+        _assert_scenarios_conservation(self, bars, res_default)
+        _assert_scenarios_conservation(self, bars, res_manual)
+
+        mat_def = res_default["cenarios"]["material"]["resumo"]
+        mat_man = res_manual["cenarios"]["material"]["resumo"]
+        self.assertLessEqual(mat_man["total_ajustes_corte"], mat_def["total_ajustes_corte"])
+        self.assertLess(mat_man["total_ajustes_corte"], mat_def["total_ajustes_corte"])
+        self.assertLessEqual(
+            mat_man["total_barras_complexas"], mat_def["total_barras_complexas"]
+        )
+        self.assertEqual(mat_man["total_retomadas_sobras"], 0)
+        self.assertEqual(mat_man["pico_sobras_simultaneas"], 0)
+        for bar in res_manual["cenarios"]["material"]["barras_flat"]:
+            self.assertEqual(
+                bar["medidas_distintas_barra"],
+                len({p["medida_corte_mm"] for p in bar["pecas"]}),
+            )
+
+        # Compatibilidade total com perfil simétrico (// com giro)
+        sym_bars = [
+            _make_bar(
+                1030.0,
+                qtd=6,
+                angulo_esq=45,
+                angulo_dir=45,
+                perfil_simetrico=True,
+                largura_perfil_mm=45.0,
+            )
+        ]
+        res_sym_man = build_bar_optimization(
+            sym_bars,
+            OptimizationConfig(comprimento_barra_mm=6000.0, priorizar_mesma_medida=True),
+            self.rules,
+        )
+        _assert_scenarios_conservation(self, sym_bars, res_sym_man)
+        self.assertEqual(res_sym_man["cenarios"]["material"]["resumo"]["total_barras"], 1)
+
+        # Integração via POST /api/optimize/bars
+        res_api = self.client.post(
+            "/api/optimize/bars",
+            json={
+                "comprimento_barra_mm": 6000.0,
+                "priorizar_mesma_medida": True,
+                "detailed_bars": bars,
+            },
+        )
+        self.assertEqual(res_api.status_code, 200)
+        api_json = res_api.json()
+        self.assertTrue(api_json["config"]["priorizar_mesma_medida"])
+        self.assertEqual(
+            api_json["cenarios"]["material"]["resumo"]["total_ajustes_corte"],
+            mat_man["total_ajustes_corte"],
+        )
+
+    def test_tempo_limite_sobras_simultaneas_enforces_rack_cap(self) -> None:
+        # 6 barras abertas simultaneamente no FFD ilimitado (3500 -> 2000 -> 500)
+        bars = [
+            _make_bar(3500.0, op="1", qtd=6),
+            _make_bar(2000.0, op="2", qtd=6),
+            _make_bar(500.0, op="3", qtd=6),
+        ]
+        res_unlim = build_bar_optimization(
+            bars,
+            OptimizationConfig(comprimento_barra_mm=6000.0, limite_sobras_simultaneas=None),
+            self.rules,
+        )
+        _assert_scenarios_conservation(self, bars, res_unlim)
+        tmp_unlim = res_unlim["cenarios"]["tempo_execucao"]["resumo"]
+        self.assertEqual(tmp_unlim["pico_sobras_simultaneas"], 6)
+        self.assertEqual(tmp_unlim["total_ciclos_drenagem"], 0)
+
+        # Limite = 2: ondas com drenagem automática mantêm exatamente 6 barras (100% aprov.)
+        res_lim2 = build_bar_optimization(
+            bars,
+            OptimizationConfig(comprimento_barra_mm=6000.0, limite_sobras_simultaneas=2),
+            self.rules,
+        )
+        _assert_scenarios_conservation(self, bars, res_lim2)
+        tmp_lim2 = res_lim2["cenarios"]["tempo_execucao"]["resumo"]
+        self.assertEqual(tmp_lim2["total_barras"], 6)
+        self.assertEqual(tmp_lim2["aproveitamento_medio_pct"], 100.0)
+        self.assertEqual(tmp_lim2["pico_sobras_simultaneas"], 2)
+        self.assertGreater(tmp_lim2["total_retomadas_sobras"], 0)
+        self.assertGreater(tmp_lim2["total_ciclos_drenagem"], 0)
+
+        roteiro2 = res_lim2["cenarios"]["tempo_execucao"]["grupos"][0]["roteiro_medidas"]
+        self.assertEqual(
+            [a["barra_numero"] for a in roteiro2[0]["alocacoes"]], [1, 2]
+        )
+        self.assertTrue(
+            all("Guardar · Vaga" in a["acao_cavalete"] for a in roteiro2[0]["alocacoes"])
+        )
+        self.assertTrue(roteiro2[1]["eh_drenagem"])
+        self.assertEqual(roteiro2[1]["medida_corte_mm"], 2000.0)
+        self.assertTrue(roteiro2[2]["eh_drenagem"])
+        self.assertEqual(roteiro2[2]["medida_corte_mm"], 500.0)
+        self.assertTrue(
+            all("Fim · Libera Vaga" in a["acao_cavalete"] for a in roteiro2[2]["alocacoes"])
+        )
+        self.assertFalse(roteiro2[3]["eh_drenagem"])
+        self.assertEqual(
+            [a["barra_numero"] for a in roteiro2[3]["alocacoes"]], [3, 4]
+        )
+
+        # Limite = 1: também fecha em 6 barras sem ultrapassar 1 sobra simultânea
+        res_lim1 = build_bar_optimization(
+            bars,
+            OptimizationConfig(comprimento_barra_mm=6000.0, limite_sobras_simultaneas=1),
+            self.rules,
+        )
+        _assert_scenarios_conservation(self, bars, res_lim1)
+        tmp_lim1 = res_lim1["cenarios"]["tempo_execucao"]["resumo"]
+        self.assertEqual(tmp_lim1["total_barras"], 6)
+        self.assertLessEqual(tmp_lim1["pico_sobras_simultaneas"], 1)
+        self.assertGreater(tmp_lim1["total_retomadas_sobras"], 0)
+        self.assertGreater(tmp_lim1["total_ciclos_drenagem"], 0)
+        for grp in res_lim1["cenarios"]["tempo_execucao"]["grupos"]:
+            self.assertLessEqual(grp["pico_sobras_simultaneas"], 1)
+
+        # Validação HTTP 422 para limite_sobras_simultaneas <= 0
+        res_bad = self.client.post(
+            "/api/optimize/bars",
+            json={
+                "comprimento_barra_mm": 6000.0,
+                "limite_sobras_simultaneas": 0,
+                "detailed_bars": bars,
+            },
+        )
+        self.assertEqual(res_bad.status_code, 422)
+
+        # Integração API + CSV/XLSX com novas colunas de vagas/drenagem
+        res_api = self.client.post(
+            "/api/optimize/bars",
+            json={
+                "comprimento_barra_mm": 6000.0,
+                "priorizar_mesma_medida": True,
+                "limite_sobras_simultaneas": 2,
+                "detailed_bars": bars,
+            },
+        )
+        self.assertEqual(res_api.status_code, 200)
+        opt_payload = res_api.json()
+        self.assertLessEqual(
+            opt_payload["cenarios"]["tempo_execucao"]["resumo"]["pico_sobras_simultaneas"],
+            2,
+        )
+
+        res_csv_mat = self.client.post(
+            "/api/export/csv",
+            json={"mode": "otimizacao_material", "bar_optimization": opt_payload},
+        )
+        self.assertEqual(res_csv_mat.status_code, 200)
+        self.assertIn("Medidas_Distintas", res_csv_mat.text)
+
+        res_csv_rot = self.client.post(
+            "/api/export/csv",
+            json={"mode": "otimizacao_tempo_roteiro", "bar_optimization": opt_payload},
+        )
+        self.assertEqual(res_csv_rot.status_code, 200)
+        for col in ("Tipo_Passo", "Vaga_Cavalete", "Acao_Cavalete"):
+            self.assertIn(col, res_csv_rot.text)
+
+        res_xlsx = self.client.post(
+            "/api/export/xlsx",
+            json={"bar_optimization": opt_payload},
+        )
+        self.assertEqual(res_xlsx.status_code, 200)
+        wb = load_workbook(io.BytesIO(res_xlsx.content))
+        mat_headers = [c.value for c in wb["Otimizacao_Material"][1]]
+        rot_headers = [c.value for c in wb["Otimizacao_Tempo_Roteiro"][1]]
+        cmp_headers = [c.value for c in wb["Otimizacao_Comparativo"][1]]
+        self.assertIn("Medidas_Distintas", mat_headers)
+        for col in ("Tipo_Passo", "Vaga_Cavalete", "Acao_Cavalete"):
+            self.assertIn(col, rot_headers)
+        for col in (
+            "Material_Barras_4_Mais_Medidas",
+            "Tempo_Retomadas_Sobras",
+            "Tempo_Pico_Sobras_Cavalete",
+        ):
+            self.assertIn(col, cmp_headers)
+
 
 if __name__ == "__main__":
     unittest.main()

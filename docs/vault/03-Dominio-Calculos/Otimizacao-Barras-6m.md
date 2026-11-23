@@ -1,8 +1,8 @@
 ---
 modulo: "backend/app/bar_optimizer.py"
 tipo: "dominio"
-data_atualizacao: 2026-11-19
-tags: [regras-negocio, otimizacao, barras-6m, cutting-stock, portas]
+data_atualizacao: 2026-11-23
+tags: [regras-negocio, otimizacao, barras-6m, cutting-stock, portas, serra-manual]
 ---
 
 # Regra: Otimização Linear de Barras de 6m em Dois Cenários (Material vs Tempo)
@@ -21,10 +21,13 @@ Todas as peças com `medida_corte_mm <= comprimento_barra_mm - desponte_mm` entr
 
 - **Cenário 1 — Aproveitamento de Material (`cenarios.material`, via `_build_material_group`):**
   - Empacotamento global no menor número de barras possível (`_pack_min_bars`): portfólio BFD (`_bin_pack_bfd`), FFD (`_bin_pack_ffd`) e Preenchimento Exato (`_bin_pack_exact_fill` com `_find_bar_patterns`), seguido de redução exata 3-para-2 (`_reduce_bins_3_to_2`) e concentração de retalho na última barra (`_concentrate_scrap`).
+  - **Modo Serra Manual — Mesma Medida Primeiro (`priorizar_mesma_medida=True`, via `_pack_same_measure_first`):** empacota priorizando barras que já possuem a mesma medida antes de aplicar Best-Fit, mantendo 0 sobras no cavalete e reduzindo drasticamente trocas manuais de batente e barras complexas (`>= 4` medidas distintas, contabilizadas em `medidas_distintas_barra` e `barras_complexas_qtd`).
   - **Encadeamento inteligente de medidas e ângulos (`_assign_and_order_material_bars` + `_order_pieces_by_angle`):** ordena a sequência de barras e orienta peças assimétricas (`45° / 90°` ↔ `90° / 45°`) para casar medida e ângulo entre peças e barras consecutivas, reduzindo trocas de batente e giros de serra sem alterar o consumo de barras.
 - **Cenário 2 — Tempo de Execução (`cenarios.tempo_execucao`, via `_build_tempo_execucao_group`):**
-  - Agrupa cortes idênticos em lote estritamente **da maior para a menor medida**, ordenando/orientando ângulos dentro do passo (`_order_pieces_by_angle`) e alocando via First-Fit Decreasing (FFD) que reaproveita sobras de barras já semi-cortadas.
-  - Produz `roteiro_medidas` (e `roteiro_flat` consolidado) diferenciando explicitamente `"Barra nova"` vs `"Sobra da Barra #N"` com `sobra_antes_mm`, `sobra_depois_mm`, `angulos_corte`, `troca_angulo` e `trocas_angulo_passo`.
+  - Agrupa cortes idênticos em lote estritamente **da maior para a menor medida**, ordenando/orientando ângulos dentro do passo (`_order_pieces_by_angle`).
+  - Quando `limite_sobras_simultaneas` é `None` (padrão), aloca via First-Fit Decreasing (FFD) reaproveitando todas as barras semi-cortadas.
+  - **Cavalete por Ondas com Drenagem Automática (`limite_sobras_simultaneas >= 1`):** mantém uma janela ativa (`active_rack`) com no máximo `N` barras semi-cortadas simultâneas usando **Best-Fit**; sempre que o cavalete atinge `N` barras e uma nova barra seria necessária, **pausa a abertura de novas barras e drena o cavalete** (`_drain_rack`), cortando nas sobras ativas as maiores medidas compatíveis até liberar as vagas antes de abrir a próxima onda. Barras cuja sobra não comporta nenhuma peça pendente saem imediatamente (`_retire_dead_bars`).
+  - `_annotate_rack_lifecycle` anota cada alocação com `vaga_cavalete`, `proximo_passo`, `eh_fim_barra`, `acao_cavalete` (`Guardar · Vaga #K (volta #P)`, `Manter · Vaga #K (volta #P)`, `Fim · Libera Vaga #K`, `Encerrar (sem cavalete)` ou `Fim da barra`), `cavalete_ocupacao` e `eh_drenagem` por passo, além de apurar `retomadas_sobras`, `pico_sobras_simultaneas` (`<= limite_sobras_simultaneas` quando definido) e `ciclos_drenagem` (`total_ciclos_drenagem`). Quando há limite ativo, `roteiro_flat` preserva a ordem cronológica das ondas/drenagem (`(grupo_nome, passo)`).
 
 ## Ângulos de Corte (`45°` / `90°`), Trocas de Ângulo e Perfil Simétrico (`//` vs `\/`)
 
@@ -39,8 +42,8 @@ Todas as peças com `medida_corte_mm <= comprimento_barra_mm - desponte_mm` entr
 ## KPIs, Ajustes no Corte e Comparativo
 
 - **Ajustes no Corte (`ajustes_corte` / `total_ajustes_corte`):** contabiliza **estritamente trocas consecutivas de medida** (`medida[i] != medida[i-1]`, via `_annotate_and_count_adjustments`), sem incluir a regulagem inicial do primeiro corte (logo, peças todas iguais resultam em `0` ajustes; no Cenário 2 equivale a `max(0, medidas_distintas - 1)`).
-- **Resumo por cenário (`resumo`) e grupo:** `total_grupos`, `total_pecas_entrada`, `total_pecas_alocadas`, `total_pecas_inviaveis`, `total_barras`, `total_metros_pecas`, `aproveitamento_medio_pct` (% médio por barra via `_calc_avg_yield_and_loss`), `total_perda_mm`, `total_perda_metros`, `perda_media_barra_mm`, `total_ajustes_corte`, `total_trocas_angulo`, `total_economia_chanfro_mm`, `total_cortes_paralelos` e `total_cortes_v`.
-- **Comparativo direto (`comparativo`):** expõe `diferenca_barras_tempo_vs_material`, `diferenca_perda_mm_tempo_vs_material`, `diferenca_perda_metros_tempo_vs_material`, `reducao_ajustes_tempo_vs_material`, `reducao_ajustes_pct`, `reducao_trocas_angulo_tempo_vs_material` e `diferenca_economia_chanfro_mm_tempo_vs_material`.
+- **Resumo por cenário (`resumo`) e grupo:** `total_grupos`, `total_pecas_entrada`, `total_pecas_alocadas`, `total_pecas_inviaveis`, `total_barras`, `total_metros_pecas`, `aproveitamento_medio_pct` (% médio por barra via `_calc_avg_yield_and_loss`), `total_perda_mm`, `total_perda_metros`, `perda_media_barra_mm`, `total_ajustes_corte`, `total_trocas_angulo`, `total_economia_chanfro_mm`, `total_cortes_paralelos`, `total_cortes_v`, `total_barras_complexas` (`barras_complexas_qtd`), `total_retomadas_sobras` (`retomadas_sobras`), `pico_sobras_simultaneas`, `total_sobras_encerradas_limite` (`sobras_encerradas_limite`) e `total_ciclos_drenagem` (`ciclos_drenagem`).
+- **Comparativo direto (`comparativo`):** expõe `diferenca_barras_tempo_vs_material`, `diferenca_perda_mm_tempo_vs_material`, `diferenca_perda_metros_tempo_vs_material`, `reducao_ajustes_tempo_vs_material`, `reducao_ajustes_pct`, `reducao_trocas_angulo_tempo_vs_material`, `diferenca_economia_chanfro_mm_tempo_vs_material`, `pico_sobras_tempo`, `total_retomadas_tempo` e `barras_complexas_material`.
 
 ## Parâmetros Configuráveis (`OptimizationConfig`)
 
@@ -48,6 +51,8 @@ Todas as peças com `medida_corte_mm <= comprimento_barra_mm - desponte_mm` entr
 - `espessura_serra_mm` (kerf descontado entre cortes, padrão `0.0` mm)
 - `desponte_mm` (perda fixa nas pontas, padrão `0.0` mm)
 - `separar_por_acabamento` (padrão `False`)
+- `priorizar_mesma_medida` (padrão `False`, ativa `_pack_same_measure_first` no Cenário Material)
+- `limite_sobras_simultaneas` (padrão `None`, inteiro `>= 1` que ativa ondas com drenagem automática de cavalete no Cenário Tempo)
 
 ## Motor em Micrômetros
 
