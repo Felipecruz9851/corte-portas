@@ -428,3 +428,12 @@ dialog.lider-dialog::backdrop {
   overflow: hidden;
   text-overflow: ellipsis;
 }
+
+/* Auto-sizing vertical para observações na tabela de regras (progressive enhancement) */
+.rule-obs-textarea {
+  field-sizing: content;
+  height: auto;
+  width: 100%;
+  min-block-size: max(2rem, var(--target-size));
+  max-block-size: 6lh;
+}

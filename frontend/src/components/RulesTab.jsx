@@ -23,13 +23,15 @@ export default function RulesTab({
       const current = { ...prev[key] };
       if (
         field === "perfil_simetrico_lateral" ||
-        field === "perfil_simetrico_puxador"
+        field === "perfil_simetrico_puxador" ||
+        field === "puxador_adicional_quadro_fechado"
       ) {
         current[field] = Boolean(rawValue);
       } else if (
         field === "tipo_corte" ||
         field === "codigo_perfil_lateral" ||
-        field === "codigo_perfil_puxador"
+        field === "codigo_perfil_puxador" ||
+        field === "observacao"
       ) {
         current[field] = rawValue;
       } else {
@@ -91,6 +93,9 @@ export default function RulesTab({
         angulo_corte_divisoria: Number(r.angulo_corte_divisoria) === 90 ? 90 : 45,
         perfil_simetrico_lateral: Boolean(r.perfil_simetrico_lateral),
         perfil_simetrico_puxador: Boolean(r.perfil_simetrico_puxador),
+        puxador_adicional_quadro_fechado: Boolean(
+          r.puxador_adicional_quadro_fechado
+        ),
         codigo_perfil_lateral: String(r.codigo_perfil_lateral || "").trim(),
         codigo_perfil_puxador: String(r.codigo_perfil_puxador || "").trim(),
         largura_perfil_quadro_mm: Number(r.largura_perfil_quadro_mm) || 0,
@@ -101,6 +106,7 @@ export default function RulesTab({
         desconto_divisoria_mm: Number(r.desconto_divisoria_mm) || 0,
         desconto_vidro_lateral_mm: Number(r.desconto_vidro_lateral_mm) || 0,
         desconto_vidro_puxador_mm: Number(r.desconto_vidro_puxador_mm) || 0,
+        observacao: String(r.observacao ?? "").trim(),
       };
     }
     onSaveRules(normalized);
@@ -122,7 +128,7 @@ export default function RulesTab({
             )}
           </div>
           <p className="text-xs text-lider-slate leading-relaxed">
-            Perfis e ângulos: configure os ângulos de encontro (Quadro, Puxador e Divisória — gerando peças mistas 45° / 90° nas barras adjacentes quando diferentes), marque se o perfil é simétrico (permite girar 180° para encaixe paralelo //; sem giro corta em \/) e cadastre os códigos de perfil para unificar a otimização 6 m. Quando o puxador for mais largo que o quadro (ex.: Clear G = 80 vs 45 mm), desconta a diferença (35 mm) das barras adjacentes. Vidros: informe o desconto por lado sem puxador (Lateral) e com puxador (Puxador).
+            Perfis e ângulos: configure os ângulos de encontro (Quadro, Puxador e Divisória — gerando peças mistas 45° / 90° nas barras adjacentes quando diferentes), marque se o perfil é simétrico (permite girar 180° para encaixe paralelo //; sem giro corta em \/) e marque Quadro + Pux. (5 pç) quando o puxador for uma peça adicional fora do quadro fechado (4 peças no ângulo do quadro + puxador adicional; vidro 2x Lateral). Cadastre os códigos de perfil para unificar a otimização 6 m. Quando o puxador for mais largo que o quadro (ex.: Clear G = 80 vs 45 mm), desconta a diferença (35 mm) das barras adjacentes. Vidros: informe o desconto por lado sem puxador (Lateral) e com puxador (Puxador).
           </p>
         </div>
 
@@ -177,6 +183,9 @@ export default function RulesTab({
               <th title="Perfil puxador simétrico permite girar 180° na serra (//); desmarcado corta em \/">
                 Simét. Pux. (//)
               </th>
+              <th title="Quadro fechado (4 peças no ângulo do quadro) + puxador adicional (5ª peça; 6 peças se duplo). Vidro usa 2x Lateral.">
+                Quadro + Pux. (5 pç)
+              </th>
               <th>Cód. Perfil Lateral</th>
               <th>Cód. Perfil Puxador</th>
               <th className="num-header">Larg. Quadro (mm)</th>
@@ -193,7 +202,7 @@ export default function RulesTab({
           <tbody>
             {!sortedKeys.length ? (
               <tr>
-                <td colSpan={19} className="empty-cell text-center py-12 text-lider-muted">
+                <td colSpan={20} className="empty-cell text-center py-12 text-lider-muted">
                   Carregando regras de corte...
                 </td>
               </tr>
@@ -206,6 +215,8 @@ export default function RulesTab({
                   "w-28 h-8 px-2 bg-lider-surface border border-lider-border rounded-[2px] text-left font-mono text-xs text-lider-ink placeholder:text-lider-muted/60 focus:border-lider-wood focus:outline-none transition-colors";
                 const angleSelectCls =
                   "h-8 px-2 bg-lider-surface border border-lider-border rounded-[2px] font-mono text-xs text-lider-ink focus:border-lider-wood focus:outline-none";
+                const obsTextareaCls =
+                  "rule-obs-textarea block px-2.5 py-1.5 bg-lider-surface border border-lider-border rounded-[2px] text-left font-sans text-xs leading-snug text-lider-ink placeholder:text-lider-muted/60 resize-y focus:border-lider-wood focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-0 focus-visible:outline-lider-wood/40 transition-colors";
                 return (
                   <tr key={key}>
                     <th scope="row">
@@ -312,6 +323,23 @@ export default function RulesTab({
                             )
                           }
                           aria-label={`Perfil puxador simétrico (girar 180° //) para ${r.modelo}`}
+                          className="w-4 h-4 rounded-[2px] border-lider-border text-lider-wood focus:ring-lider-wood cursor-pointer"
+                        />
+                      </label>
+                    </td>
+                    <td className="text-center">
+                      <label className="inline-flex items-center justify-center cursor-pointer">
+                        <input
+                          type="checkbox"
+                          checked={Boolean(r.puxador_adicional_quadro_fechado)}
+                          onChange={(e) =>
+                            handleFieldChange(
+                              key,
+                              "puxador_adicional_quadro_fechado",
+                              e.target.checked
+                            )
+                          }
+                          aria-label={`Quadro fechado + puxador adicional (5 peças) para ${r.modelo}`}
                           className="w-4 h-4 rounded-[2px] border-lider-border text-lider-wood focus:ring-lider-wood cursor-pointer"
                         />
                       </label>
@@ -483,8 +511,18 @@ export default function RulesTab({
                         className={inputCls}
                       />
                     </td>
-                    <td className="min-w-[200px] text-xs text-lider-muted">
-                      {r.observacao || ""}
+                    <td className="min-w-[260px]">
+                      <textarea
+                        name={`observacao_${key}`}
+                        rows={2}
+                        value={r.observacao ?? ""}
+                        onChange={(e) =>
+                          handleFieldChange(key, "observacao", e.target.value)
+                        }
+                        placeholder="Adicionar observação..."
+                        aria-label={`Observação para ${r.modelo}`}
+                        className={obsTextareaCls}
+                      />
                     </td>
                   </tr>
                 );

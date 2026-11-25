@@ -1,7 +1,7 @@
 ---
 modulo: "regras-negocio-completo"
 tipo: "dominio"
-data_atualizacao: 2026-11-19
+data_atualizacao: 2026-11-24
 tags: [regras-negocio, manutencao, arquitetura, parser, corte, vidros, otimizacao, playbook]
 ---
 
@@ -216,7 +216,7 @@ Cada chave de `./backend/app/data/regras_corte.json` corresponde exatamente ao c
 | `desconto_divisoria_mm` | `float` | Sim (`number`, aceita negativo) | Desconto fixo subtraído das divisórias/travessas internas (`largura`). |
 | `desconto_vidro_lateral_mm` | `float` | Sim (`number`, `min=0`) | Desconto **por lado sem puxador** no cálculo do vidro/placa. |
 | `desconto_vidro_puxador_mm` | `float` | Sim (`number`, `min=0`) | Desconto **por lado com puxador** no cálculo do vidro/placa. |
-| `observacao` | `str` | Não (somente leitura) | Nota técnica exibida na última coluna da tabela de regras. |
+| `observacao` | `str` | Sim (`<textarea>` auto-ajustável) | Nota técnica editável exibida na última coluna da tabela de regras. |
 
 ### 5 Armadilhas Críticas do JSON e da API
 
@@ -224,7 +224,7 @@ Cada chave de `./backend/app/data/regras_corte.json` corresponde exatamente ao c
 2. **`DEFAULT_RULES_BACKUP` é um snapshot do boot do servidor:** em `./backend/main.py`, `DEFAULT_RULES_BACKUP = load_rules()` é executado uma única vez quando o módulo `main` é importado. O botão **"Restaurar Padrão"** (`POST /api/rules/reset`) restaura o arquivo para o estado em que o servidor foi iniciado — **não** há um arquivo separado de fábrica. Após editar `regras_corte.json` manualmente no disco, reinicie o servidor FastAPI.
 3. **A chave `"OUTRO"` é obrigatória no JSON:** tanto `compute_item_cuts` quanto `compute_item_glasses` executam `rule = rules.get(item.modelo) or rules["OUTRO"]`. Remover `"OUTRO"` derruba a extração com `KeyError`.
 4. **Descontos negativos atuam como acréscimo:** os campos `desconto_vertical_mm`, `desconto_horizontal_mm` e `desconto_divisoria_mm` não restringem sinal negativo. Como `_safe_cut(nominal, discount)` calcula `round(max(0.0, nominal - discount), 3)`, um desconto de `-2.0` soma `+2.0 mm` à medida de corte.
-5. **Limites da UI `RulesTab.jsx`:** a tabela renderiza automaticamente qualquer nova chave adicionada em `regras_corte.json` (ordenada alfabeticamente), mas não possui botões de "Adicionar Modelo" ou "Excluir Modelo", nem campos editáveis para `descricao` e `observacao`. Além disso, valores de `tipo_corte` fora das 4 `<option>`s do `<select>` não serão exibidos corretamente na UI.
+5. **Limites da UI `RulesTab.jsx`:** a tabela renderiza automaticamente qualquer nova chave adicionada em `regras_corte.json` (ordenada alfabeticamente), mas não possui botões de "Adicionar Modelo" ou "Excluir Modelo", nem campo editável para `descricao`. Além disso, valores de `tipo_corte` fora das 4 `<option>`s do `<select>` não serão exibidos corretamente na UI.
 
 ---
 
@@ -513,7 +513,7 @@ Para reduzir o acoplamento entre código Python/React e o crescimento do catálo
 
 1. **Separar defaults de fábrica (`regras_corte.default.json`) dos overrides de produção (`regras_corte.json`):** eliminar a dependência do snapshot em memória `DEFAULT_RULES_BACKUP` e adicionar `schema_version` com migração automática de novos campos.
 2. **Introduzir `geometria_tipo` declarativo na regra:** mover a escolha entre `quadro_padrao`, `allu_escada`, `corte_explicito` e `barra_avulsa` para um atributo da regra, desacoplando `compute_item_cuts()` de nomes fixos de categoria/modelo.
-3. **CRUD completo de modelos na UI (`RulesTab.jsx`):** permitir criar/clonar modelos pela interface (com proteção impedindo apagar `"OUTRO"`) e editar `descricao` e `observacao` sem abrir JSON manualmente.
+3. **CRUD completo de modelos na UI (`RulesTab.jsx`):** permitir criar/clonar modelos pela interface (com proteção impedindo apagar `"OUTRO"`) e editar `descricao` sem abrir JSON manualmente.
 4. **Tabela declarativa de detecção de descrições (Data-Driven Parser):** migrar aliases, regexes de modelo e flags de puxador implícito para uma configuração estruturada ordenada por prioridade, com testes automatizados de colisão entre padrões.
 5. **Suporte a múltiplos vidros por vão e desconto exclusivo da barra puxador:** fatiar vidros conforme `divisorias_mm` (ex.: `SINGULAR` e portas com travessa) e separar `desconto_barra_puxador_mm` do desconto das barras laterais/horizontais do quadro quando um novo perfil exigir.
 

@@ -14,6 +14,7 @@ if str(BACKEND_DIR) not in sys.path:
 
 from fastapi.testclient import TestClient
 
+from app.bar_optimizer import OptimizationConfig, build_bar_optimization
 from app.cutting_engine import (
     CuttingRule,
     build_cutting_plan,
@@ -580,6 +581,263 @@ class TestExtractionAndCutting(unittest.TestCase):
             Path(BACKEND_DIR / "app" / "data" / "regras_corte.json").write_text(
                 rules_backup, encoding="utf-8"
             )
+
+    def test_rules_api_observacao_roundtrip(self) -> None:
+        rules_path = Path(BACKEND_DIR / "app" / "data" / "regras_corte.json")
+        original_bytes = rules_path.read_bytes()
+        try:
+            res_get = self.client.get("/api/rules")
+            self.assertEqual(res_get.status_code, 200)
+            rules_payload = res_get.json()["rules"]
+
+            rules_payload["CATCH"]["observacao"] = (
+                "  Nota editada pelo PCP para perfil 5307/5317  "
+            )
+            rules_payload["OUTRO"]["observacao"] = ""
+            rules_payload["RISK"]["observacao"] = None
+
+            res_put = self.client.put("/api/rules", json={"rules": rules_payload})
+            self.assertEqual(res_put.status_code, 200)
+            saved = res_put.json()["rules"]
+            self.assertEqual(
+                saved["CATCH"]["observacao"],
+                "Nota editada pelo PCP para perfil 5307/5317",
+            )
+            self.assertEqual(saved["OUTRO"]["observacao"], "")
+            self.assertEqual(saved["RISK"]["observacao"], "")
+
+            res_get_after = self.client.get("/api/rules")
+            self.assertEqual(res_get_after.status_code, 200)
+            persisted = res_get_after.json()["rules"]
+            self.assertEqual(
+                persisted["CATCH"]["observacao"],
+                "Nota editada pelo PCP para perfil 5307/5317",
+            )
+            self.assertEqual(persisted["OUTRO"]["observacao"], "")
+            self.assertEqual(persisted["RISK"]["observacao"], "")
+        finally:
+            rules_path.write_bytes(original_bytes)
+
+    def test_risk_closed_frame_plus_additional_handle(self) -> None:
+        # 1) Regra RISK carregada de regras_corte.json
+        risk_rule = self.rules["RISK"]
+        self.assertTrue(risk_rule.puxador_adicional_quadro_fechado)
+        self.assertEqual(risk_rule.tipo_corte, "45° / 90° (Misto)")
+        self.assertEqual(risk_rule.angulo_corte_quadro, 45)
+        self.assertEqual(risk_rule.angulo_corte_puxador, 90)
+        self.assertEqual(risk_rule.codigo_perfil_lateral, "RISK")
+        self.assertEqual(risk_rule.codigo_perfil_puxador, "RISK")
+
+        def make_row(codigo: str, desc: str, qtd: float = 1.0) -> RawOpRow:
+            return RawOpRow(
+                local_producao="PORTAS",
+                data_abertura="2026-11-25",
+                data_entrega="30/11/2026",
+                codigo=codigo,
+                descricao=desc,
+                quantidade=qtd,
+                op="200500",
+                observacao="",
+                pedido="300500",
+                item_pedido="1",
+                ambiente="DORMITORIO",
+                valor_insumos=None,
+                valor_mp=None,
+            )
+
+        # 2) RISK sem puxador (SEM PUXADOR e SEM USINAGEM): 4 peças (45°/45°) e vidro 2x Lateral
+        for desc_sem in (
+            "PORTA BATER RISK_SEM PUXADOR_ESQUERDA_LARGURA 581_ALTURA 2409_PERFIL GRAFITE _ PLACA REFLETENTE GRIGIO_FURACAO PAGINA 172",
+            "PORTA SOFT CLOSING SI OCEAN 80_CORRER RISK SEM USINAGEM_EXTERNA_ESQUERDA_LARGURA 896_ALTURA 2400_PERFIL PADRAO CONCRETO- FOSCA_PLACA GRUPO 3\\ 0074 - CONCRETO",
+        ):
+            ex_sem = parse_description(make_row("2PTNP0", desc_sem))
+            bars_sem = compute_item_cuts(ex_sem, self.rules)
+            self.assertEqual(sum(b.qtd_barras for b in bars_sem), 4)
+            self.assertEqual({(b.angulo_esq, b.angulo_dir) for b in bars_sem}, {(45, 45)})
+            self.assertTrue(all(not b.eh_perfil_puxador for b in bars_sem))
+            g_sem = compute_item_glasses(ex_sem, self.rules)[0]
+            self.assertEqual(g_sem.regra_largura, "2x Lateral")
+            self.assertEqual(g_sem.regra_altura, "2x Lateral")
+
+        # 3) RISK com 1 puxador lateral (quantidade=1 -> 5 peças; quantidade=2 -> 10 peças)
+        ex_lat = parse_description(
+            make_row(
+                "2PTNP412ZDM41",
+                "PORTA BATER RISK_DIREITA_LARGURA 434_ALTURA 2309_PERFIL PADRAO PRETA - FOSCA_ PLACA INCOLOR LOW IRON_FURACAO PAGINA 172",
+                qtd=1.0,
+            )
+        )
+        bars_lat = compute_item_cuts(ex_lat, self.rules)
+        self.assertEqual(sum(b.qtd_barras for b in bars_lat), 5)
+        by_fn_lat = {b.funcao_barra: b for b in bars_lat}
+        self.assertEqual(by_fn_lat["Vertical Quadro"].qtd_barras, 2)
+        self.assertEqual(by_fn_lat["Vertical Quadro"].angulos_corte, "45° / 45°")
+        self.assertEqual(by_fn_lat["Vertical Quadro"].medida_corte_mm, 2309.0)
+        self.assertEqual(by_fn_lat["Horizontal Quadro"].qtd_barras, 2)
+        self.assertEqual(by_fn_lat["Horizontal Quadro"].angulos_corte, "45° / 45°")
+        self.assertEqual(by_fn_lat["Horizontal Quadro"].medida_corte_mm, 434.0)
+        pux_lat = by_fn_lat["Puxador Vertical (DIREITA)"]
+        self.assertEqual(pux_lat.qtd_barras, 1)
+        self.assertTrue(pux_lat.eh_perfil_puxador)
+        self.assertEqual(pux_lat.codigo_perfil, "RISK")
+        self.assertEqual(pux_lat.angulos_corte, "90° / 90°")
+        self.assertEqual(pux_lat.medida_corte_mm, 2309.0)
+
+        ex_lat_q2 = parse_description(
+            make_row(
+                "2PTAGON7MBS91",
+                "PORTA BATER RISK USINADO LATERAL - ESQUERDA - LARGURA 396 - ALTURA 1206 - PERFIL LACA FOSCA DAKAR - PLACA REFLETENTE BRONZE",
+                qtd=2.0,
+            )
+        )
+        bars_lat_q2 = compute_item_cuts(ex_lat_q2, self.rules)
+        self.assertEqual(sum(b.qtd_barras for b in bars_lat_q2), 10)
+
+        # Vidro RISK usa sempre 2x Lateral mesmo com desconto_vidro_puxador_mm diferente
+        glass_rules = dict(self.rules)
+        glass_rules["RISK"] = CuttingRule(
+            modelo="RISK",
+            descricao="Risk teste vidro quadro fechado",
+            tipo_corte="45° / 90° (Misto)",
+            desconto_vertical_mm=0.0,
+            desconto_horizontal_mm=0.0,
+            desconto_divisoria_mm=0.0,
+            desconto_vidro_lateral_mm=10.0,
+            desconto_vidro_puxador_mm=25.0,
+            angulo_corte_quadro=45,
+            angulo_corte_puxador=90,
+            puxador_adicional_quadro_fechado=True,
+        )
+        g_lat = compute_item_glasses(ex_lat, glass_rules)[0]
+        self.assertEqual(g_lat.regra_largura, "2x Lateral")
+        self.assertEqual(g_lat.regra_altura, "2x Lateral")
+        self.assertEqual(g_lat.desconto_largura_mm, 20.0)
+        self.assertEqual(g_lat.desconto_altura_mm, 20.0)
+
+        # 4) RISK com 1 puxador horizontal (Superior, Gaveta, Báscula) -> 5 peças
+        for desc_horiz, larg_exp, alt_exp in (
+            (
+                "PORTA BATER RISK USINADO SUPERIOR - DIREITA - LARGURA 369 - ALTURA 756 - PERFIL COALA - PLACA PERFURADA",
+                369.0,
+                756.0,
+            ),
+            (
+                "FRENTE GAVETA RISK USINADO - LARGURA 596 - ALTURA 410 - PERFIL COALA - PLACA PERFURADA",
+                596.0,
+                410.0,
+            ),
+            (
+                "FRENTE BASCULA INVERSA RISK USINADO - LARGURA 836 - ALTURA 376 - PERFIL COALA - PLACA PERFURADA",
+                836.0,
+                376.0,
+            ),
+        ):
+            ex_h = parse_description(make_row("2PTAGH", desc_horiz))
+            bars_h = compute_item_cuts(ex_h, self.rules)
+            self.assertEqual(sum(b.qtd_barras for b in bars_h), 5)
+            by_fn_h = {b.funcao_barra: b for b in bars_h}
+            self.assertEqual(by_fn_h["Vertical Quadro"].angulos_corte, "45° / 45°")
+            self.assertEqual(by_fn_h["Vertical Quadro"].medida_corte_mm, alt_exp)
+            self.assertEqual(by_fn_h["Horizontal Quadro"].angulos_corte, "45° / 45°")
+            self.assertEqual(by_fn_h["Horizontal Quadro"].medida_corte_mm, larg_exp)
+            pux_h = by_fn_h["Puxador Horizontal"]
+            self.assertEqual(pux_h.qtd_barras, 1)
+            self.assertTrue(pux_h.eh_perfil_puxador)
+            self.assertEqual(pux_h.orientacao, "HORIZONTAL")
+            self.assertEqual(pux_h.medida_corte_mm, larg_exp)
+            self.assertEqual(pux_h.angulos_corte, "90° / 90°")
+            g_h = compute_item_glasses(ex_h, glass_rules)[0]
+            self.assertEqual(g_h.regra_largura, "2x Lateral")
+            self.assertEqual(g_h.regra_altura, "2x Lateral")
+
+        # 5) RISK com 2 puxadores -> 6 peças (4 quadro 45°/45° + 2 puxador 90°/90°)
+        ex_dup = parse_description(
+            make_row(
+                "2PTNP7POYS1N3",
+                "PORTA SOFT CLOSING SI OCEAN 80_CORRER RISK_EXTERNA_C/ PUXADOR DIREITO E ESQUERDO_LARGURA 1219.333_ALTURA 2640_PERFIL QUINOA_PLACA REFLETENTE BRONZE",
+            )
+        )
+        bars_dup = compute_item_cuts(ex_dup, self.rules)
+        self.assertEqual(sum(b.qtd_barras for b in bars_dup), 6)
+        by_fn_dup = {b.funcao_barra: b for b in bars_dup}
+        self.assertEqual(by_fn_dup["Puxador Vertical (Dir/Esq)"].qtd_barras, 2)
+        self.assertEqual(by_fn_dup["Puxador Vertical (Dir/Esq)"].angulos_corte, "90° / 90°")
+        self.assertEqual(by_fn_dup["Puxador Vertical (Dir/Esq)"].medida_corte_mm, 2640.0)
+        g_dup = compute_item_glasses(ex_dup, glass_rules)[0]
+        self.assertEqual(g_dup.regra_largura, "2x Lateral")
+        self.assertEqual(g_dup.regra_altura, "2x Lateral")
+
+        # 6) RISK com divisória interna -> 6 peças (4 quadro + 1 puxador + 1 divisória)
+        ex_div = parse_description(
+            make_row(
+                "2PTNP_DIV",
+                "PORTA BATER RISK_DIREITA_LARGURA 500_ALTURA 2000_PERFIL PRETA_PLACA INCOLOR - TRAVESSA A 1000MM",
+            )
+        )
+        bars_div = compute_item_cuts(ex_div, self.rules)
+        self.assertEqual(sum(b.qtd_barras for b in bars_div), 6)
+        by_fn_div = {b.funcao_barra: b for b in bars_div}
+        self.assertEqual(by_fn_div["Travessa Divisória Interna"].qtd_barras, 1)
+        self.assertEqual(by_fn_div["Travessa Divisória Interna"].angulos_corte, "90° / 90°")
+
+        # 7) Otimização 6m unificando quadro 45°/45° e puxador 90°/90° no grupo RISK
+        detailed_risk, _ = build_cutting_plan([ex_lat], self.rules)
+        opt = build_bar_optimization(
+            detailed_risk, OptimizationConfig(comprimento_barra_mm=6000.0), self.rules
+        )
+        for scen_id in ("material", "tempo_execucao"):
+            scen = opt["cenarios"][scen_id]
+            self.assertEqual(scen["resumo"]["total_pecas_entrada"], 5)
+            self.assertEqual(scen["resumo"]["total_pecas_alocadas"], 5)
+            self.assertEqual(len(scen["grupos"]), 1)
+            grp = scen["grupos"][0]
+            self.assertEqual(grp["grupo_nome"], "RISK")
+            self.assertEqual(grp["origem_agrupamento"], "codigo_perfil")
+            angs = {
+                p["angulos_corte"]
+                for b in scen["barras_flat"]
+                for p in b["pecas"]
+            }
+            self.assertEqual(angs, {"45° / 45°", "90° / 90°"})
+
+        # 8) Round-trip GET/PUT /api/rules preservando e recalculando puxador_adicional_quadro_fechado
+        rules_path = Path(BACKEND_DIR / "app" / "data" / "regras_corte.json")
+        original_bytes = rules_path.read_bytes()
+        try:
+            html_risk = """
+            <html><body>
+            LOCAL DE PRODUÇÃO = <b>PORTAS</b> DATA DE ABERTURA = <b>2026-11-25</b>
+            <table>
+              <tr><td><b>Data de Entrega 30/11/2026:</b></td></tr>
+              <tr>
+                <td>2PTNP412ZDM41</td>
+                <td>PORTA BATER RISK_DIREITA_LARGURA 434_ALTURA 2309_PERFIL PRETA_PLACA INCOLOR</td>
+                <td>1</td><td>200500</td><td></td><td>300500</td><td>1</td><td>SALA</td>
+              </tr>
+            </table>
+            </body></html>
+            """
+            res_ext = self.client.post(
+                "/api/extract/html",
+                json={"html": html_risk, "source_name": "risk.html"},
+            )
+            self.assertEqual(res_ext.status_code, 200)
+            self.assertEqual(res_ext.json()["kpis"]["total_barras_corte"], 5)
+
+            rules_payload = self.client.get("/api/rules").json()["rules"]
+            self.assertIs(rules_payload["RISK"]["puxador_adicional_quadro_fechado"], True)
+            rules_payload["RISK"]["puxador_adicional_quadro_fechado"] = False
+            res_put = self.client.put("/api/rules", json={"rules": rules_payload})
+            self.assertEqual(res_put.status_code, 200)
+            self.assertIs(
+                res_put.json()["rules"]["RISK"]["puxador_adicional_quadro_fechado"],
+                False,
+            )
+            self.assertEqual(
+                res_put.json()["recalculated"]["kpis"]["total_barras_corte"], 4
+            )
+        finally:
+            rules_path.write_bytes(original_bytes)
 
 
 if __name__ == "__main__":

@@ -1229,6 +1229,64 @@ def _annotate_rack_lifecycle(
     return retomadas_sobras, pico_sobras_simultaneas
 
 
+def _collect_pieces_modelos(
+    pieces: List[Dict[str, Any]],
+    fallback_modelos: Optional[List[str]] = None,
+) -> str:
+    """Coleta nomes únicos ordenados de modelos das peças (ou fallback)."""
+    modelos = sorted(
+        {
+            str(p.get("modelo") or "").strip()
+            for p in pieces
+            if str(p.get("modelo") or "").strip()
+        }
+    )
+    if not modelos and fallback_modelos:
+        modelos = sorted(
+            {str(m).strip() for m in fallback_modelos if str(m).strip()}
+        )
+    return ", ".join(modelos)
+
+
+def _collect_pieces_observacao(pieces: List[Dict[str, Any]]) -> str:
+    """Agrega observações únicas de regra, corte e OP preservando ordem."""
+    parts: List[str] = []
+    seen_texts = set()
+
+    regra_pairs: List[Tuple[str, str]] = []
+    seen_regra_pairs = set()
+    for p in pieces:
+        obs_reg = str(p.get("observacao_regra") or "").strip()
+        if not obs_reg:
+            continue
+        mod = str(p.get("modelo") or "").strip()
+        pair = (mod, obs_reg)
+        if pair not in seen_regra_pairs:
+            seen_regra_pairs.add(pair)
+            regra_pairs.append(pair)
+
+    distinct_regra_texts = {obs for _, obs in regra_pairs}
+    if len(distinct_regra_texts) == 1:
+        only_obs = regra_pairs[0][1]
+        parts.append(only_obs)
+        seen_texts.add(only_obs)
+    elif len(distinct_regra_texts) > 1:
+        for mod, obs in regra_pairs:
+            formatted = f"{mod}: {obs}" if mod else obs
+            if formatted not in seen_texts:
+                parts.append(formatted)
+                seen_texts.add(formatted)
+
+    for field in ("observacao_corte", "observacao_op"):
+        for p in pieces:
+            val = str(p.get(field) or "").strip()
+            if val and val not in seen_texts:
+                parts.append(val)
+                seen_texts.add(val)
+
+    return " | ".join(parts)
+
+
 def _build_tempo_execucao_group(
     eligible: List[Dict[str, Any]],
     gm: Dict[str, Any],
@@ -1313,6 +1371,11 @@ def _build_tempo_execucao_group(
                     "barra_global_numero": 0,  # preenchido após ordenação global
                     "eh_sobra": eh_sobra,
                     "origem_barra": origem_str,
+                    "modelo": _collect_pieces_modelos(
+                        alloc_pcs, sorted(gm["modelos_set"])
+                    ),
+                    "codigo_perfil": gm["codigo_perfil"],
+                    "observacao": _collect_pieces_observacao(alloc_pcs),
                     "qtd_cortes": len(alloc_pcs),
                     "angulos_corte": ", ".join(alloc_angles),
                     "sobra_antes_mm": _from_um(sobra_before_um[b_num]),
@@ -1324,6 +1387,13 @@ def _build_tempo_execucao_group(
             )
 
         ops_step_sorted = sorted(step_ops)
+        step_modelos = sorted(
+            {
+                str(p.get("modelo") or "").strip()
+                for p in step_pcs
+                if str(p.get("modelo") or "").strip()
+            }
+        ) or sorted(gm["modelos_set"])
         step_angles = sorted(
             {
                 _format_angles(
@@ -1341,6 +1411,9 @@ def _build_tempo_execucao_group(
                 "grupo_nome": gm["grupo_nome"],
                 "origem_agrupamento": gm["origem_agrupamento"],
                 "codigo_perfil": gm["codigo_perfil"],
+                "modelos": step_modelos,
+                "modelo": ", ".join(step_modelos),
+                "observacao": _collect_pieces_observacao(step_pcs),
                 "passo": passo_idx,
                 "medida_corte_mm": med_mm,
                 "eh_drenagem": eh_drenagem,
@@ -1913,6 +1986,14 @@ def build_bar_optimization(
         else:
             larg_perfil_mm = 0.0
         prof_w_um = max(0, _to_um(larg_perfil_mm))
+        if "observacao_regra" in bar and bar["observacao_regra"] is not None:
+            obs_regra = str(bar["observacao_regra"]).strip()
+        elif rule_bar is not None:
+            obs_regra = str(rule_bar.observacao or "").strip()
+        else:
+            obs_regra = ""
+        obs_op = str(bar.get("observacao_op") or "").strip()
+        obs_corte = str(bar.get("observacao_corte") or "").strip()
 
         for _ in range(qtd):
             groups_pieces[g_key].append(
@@ -1937,7 +2018,9 @@ def build_bar_optimization(
                     "angulos_corte": ang_str,
                     "perfil_simetrico": perfil_sim,
                     "largura_perfil_mm": larg_perfil_mm,
-                    "observacao_corte": str(bar.get("observacao_corte") or ""),
+                    "observacao_corte": obs_corte,
+                    "observacao_regra": obs_regra,
+                    "observacao_op": obs_op,
                     "medida_corte_mm": med_mm,
                     "_c_um": c_um,
                     "_w_um": c_um + K_um,

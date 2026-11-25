@@ -30,6 +30,7 @@ from app.cutting_engine import (
 from app.description_parser import ExtractedItem, parse_description
 from app.erp_client import ERPAuthenticationError, ERPClient, ERPConnectionError
 from app.exporter import (
+    export_roteiro_to_xlsx_bytes,
     export_to_csv_bytes,
     export_to_json_bytes,
     export_to_xlsx_bytes,
@@ -104,6 +105,7 @@ class RuleUpdateModel(BaseModel):
     angulo_corte_divisoria: Optional[int] = None
     perfil_simetrico_lateral: bool = False
     perfil_simetrico_puxador: bool = False
+    puxador_adicional_quadro_fechado: bool = False
     codigo_perfil_lateral: str = ""
     codigo_perfil_puxador: str = ""
     largura_perfil_quadro_mm: float = 0.0
@@ -114,7 +116,7 @@ class RuleUpdateModel(BaseModel):
     desconto_divisoria_mm: float = 0.0
     desconto_vidro_lateral_mm: float = 0.0
     desconto_vidro_puxador_mm: float = 0.0
-    observacao: str = ""
+    observacao: Optional[str] = ""
 
 
 class RulesBatchUpdate(BaseModel):
@@ -330,6 +332,10 @@ def update_rules(req: RulesBatchUpdate) -> Dict[str, Any]:
         data["angulo_corte_divisoria"] = _norm_angle(data.get("angulo_corte_divisoria"), d_def)
         data["perfil_simetrico_lateral"] = bool(data.get("perfil_simetrico_lateral", False))
         data["perfil_simetrico_puxador"] = bool(data.get("perfil_simetrico_puxador", False))
+        data["puxador_adicional_quadro_fechado"] = bool(
+            data.get("puxador_adicional_quadro_fechado", False)
+        )
+        data["observacao"] = str(data.get("observacao") or "").strip()
         rules[key] = CuttingRule(**data)
     save_rules(rules)
 
@@ -434,18 +440,23 @@ def _resolve_export_data(req: Optional[ExportRequest]) -> Dict[str, Any]:
 @app.post("/api/export/xlsx")
 def export_xlsx(req: Optional[ExportRequest] = None) -> Response:
     data = _resolve_export_data(req)
-    xlsx_bytes = export_to_xlsx_bytes(
-        data["items"],
-        data["corte_detalhado"],
-        data["corte_agrupado"],
-        data.get("vidro_detalhado", []),
-        data.get("vidro_agrupado", []),
-        data.get("otimizacao_barras", {}),
-    )
+    if req and req.mode == "otimizacao_tempo_roteiro":
+        xlsx_bytes = export_roteiro_to_xlsx_bytes(data.get("otimizacao_barras", {}))
+        filename = "roteiro_corte_otimizado.xlsx"
+    else:
+        xlsx_bytes = export_to_xlsx_bytes(
+            data["items"],
+            data["corte_detalhado"],
+            data["corte_agrupado"],
+            data.get("vidro_detalhado", []),
+            data.get("vidro_agrupado", []),
+            data.get("otimizacao_barras", {}),
+        )
+        filename = "plano_corte_portas.xlsx"
     return Response(
         content=xlsx_bytes,
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        headers={"Content-Disposition": 'attachment; filename="plano_corte_portas.xlsx"'},
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
 
 

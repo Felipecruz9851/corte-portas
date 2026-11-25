@@ -387,7 +387,8 @@ class TestBarOptimizer(unittest.TestCase):
                 "/api/export/csv", json={"mode": "otimizacao_tempo_roteiro"}
             )
             self.assertEqual(res_csv_rot.status_code, 200)
-            self.assertIn("Origem_Barra", res_csv_rot.text)
+            self.assertIn("Origem na Barra", res_csv_rot.text)
+            self.assertIn("Observação", res_csv_rot.text)
 
             res_csv_tmp = self.client.post(
                 "/api/export/csv",
@@ -454,8 +455,8 @@ class TestBarOptimizer(unittest.TestCase):
             json={"mode": "otimizacao_tempo_roteiro", "bar_optimization": opt_payload},
         )
         self.assertEqual(res_csv_rot.status_code, 200)
-        self.assertIn("Angulos_Corte", res_csv_rot.text)
-        self.assertIn("Troca_Angulo", res_csv_rot.text)
+        self.assertIn("Ângulos", res_csv_rot.text)
+        self.assertIn("Troca âng.", res_csv_rot.text)
 
         res_xlsx = self.client.post(
             "/api/export/xlsx",
@@ -468,8 +469,11 @@ class TestBarOptimizer(unittest.TestCase):
         cmp_headers = [c.value for c in wb["Otimizacao_Comparativo"][1]]
         self.assertIn("Angulos_Barra", mat_headers)
         self.assertIn("Trocas_Angulo_Barra", mat_headers)
-        self.assertIn("Angulos_Corte", rot_headers)
-        self.assertIn("Troca_Angulo", rot_headers)
+        self.assertIn("Ângulos", rot_headers)
+        self.assertIn("Cód. Perfil", rot_headers)
+        self.assertTrue(
+            any("Troca âng." in str(c.value or "") for c in wb["Otimizacao_Tempo_Roteiro"]["A"][1:])
+        )
         self.assertIn("Material_Trocas_Angulo", cmp_headers)
         self.assertIn("Tempo_Trocas_Angulo", cmp_headers)
 
@@ -572,7 +576,8 @@ class TestBarOptimizer(unittest.TestCase):
             json={"mode": "otimizacao_tempo_roteiro", "bar_optimization": res_sym},
         )
         self.assertEqual(res_csv_rot.status_code, 200)
-        self.assertIn("Perfil_Simetrico", res_csv_rot.text)
+        self.assertIn("Cód. Perfil", res_csv_rot.text)
+        self.assertIn("Medida (mm)", res_csv_rot.text)
 
         res_xlsx = self.client.post(
             "/api/export/xlsx",
@@ -585,7 +590,9 @@ class TestBarOptimizer(unittest.TestCase):
         cmp_headers = [c.value for c in wb["Otimizacao_Comparativo"][1]]
         for col in ("Perfil_Simetrico", "Cortes_Paralelos", "Cortes_V", "Economia_Chanfro_mm"):
             self.assertIn(col, mat_headers)
-        self.assertIn("Perfil_Simetrico", rot_headers)
+        self.assertIn("Modelo", rot_headers)
+        self.assertIn("Cód. Perfil", rot_headers)
+        self.assertIn("Observação", rot_headers)
         self.assertIn("Material_Economia_Chanfro_mm", cmp_headers)
         self.assertIn("Tempo_Economia_Chanfro_mm", cmp_headers)
 
@@ -770,8 +777,8 @@ class TestBarOptimizer(unittest.TestCase):
             json={"mode": "otimizacao_tempo_roteiro", "bar_optimization": opt_payload},
         )
         self.assertEqual(res_csv_rot.status_code, 200)
-        for col in ("Tipo_Passo", "Vaga_Cavalete", "Acao_Cavalete"):
-            self.assertIn(col, res_csv_rot.text)
+        for token in ("Passo", "Origem na Barra", "Ação / Cavalete", "Drenagem", "Vaga #", "Guardar · Vaga"):
+            self.assertIn(token, res_csv_rot.text)
 
         res_xlsx = self.client.post(
             "/api/export/xlsx",
@@ -783,14 +790,109 @@ class TestBarOptimizer(unittest.TestCase):
         rot_headers = [c.value for c in wb["Otimizacao_Tempo_Roteiro"][1]]
         cmp_headers = [c.value for c in wb["Otimizacao_Comparativo"][1]]
         self.assertIn("Medidas_Distintas", mat_headers)
-        for col in ("Tipo_Passo", "Vaga_Cavalete", "Acao_Cavalete"):
+        for col in ("Passo", "Origem na Barra", "Ação / Cavalete", "Observação"):
             self.assertIn(col, rot_headers)
+        ws_rot = wb["Otimizacao_Tempo_Roteiro"]
+        rot_rows_text = [
+            " | ".join(str(cell.value or "") for cell in row)
+            for row in ws_rot.iter_rows(min_row=2)
+        ]
+        self.assertTrue(any("Drenagem" in r for r in rot_rows_text))
+        self.assertTrue(any("Vaga #" in r for r in rot_rows_text))
+        self.assertTrue(any("Guardar · Vaga" in r for r in rot_rows_text))
         for col in (
             "Material_Barras_4_Mais_Medidas",
             "Tempo_Retomadas_Sobras",
             "Tempo_Pico_Sobras_Cavalete",
         ):
             self.assertIn(col, cmp_headers)
+
+    def test_roteiro_excel_layout_matches_frontend_with_obs_modelo_codigo(self) -> None:
+        expected_headers = [
+            "Passo",
+            "Modelo",
+            "Cód. Perfil",
+            "Ângulos",
+            "Origem na Barra",
+            "Qtd Cortes",
+            "Medida (mm)",
+            "Sobra Antes → Depois (mm)",
+            "Ação / Cavalete",
+            "OPs",
+            "Observação",
+        ]
+        custom_rules = {k: CuttingRule(**deepcopy(v.to_dict())) for k, v in self.rules.items()}
+        custom_rules["CATCH"].codigo_perfil_lateral = "5307"
+        custom_rules["DJEI"].codigo_perfil_lateral = "5307"
+        custom_rules["CATCH"].observacao = "Obs regra Catch"
+        custom_rules["DJEI"].observacao = "Obs regra Djei"
+        custom_rules["RISK"].codigo_perfil_lateral = ""
+        custom_rules["RISK"].observacao = "Obs regra Risk"
+
+        b_catch = _make_bar(2450.0, modelo="CATCH", codigo_perfil="5307", op="101", qtd=1)
+        b_catch["observacao_corte"] = "Chanfro especial"
+        b_djei = _make_bar(2450.0, modelo="DJEI", codigo_perfil="5307", op="102", qtd=1)
+        b_risk = _make_bar(1200.5, modelo="RISK", codigo_perfil="", op="103", qtd=2)
+        b_risk["observacao_corte"] = "Obs regra Risk"  # duplicata intencional com regra
+
+        opt_payload = build_bar_optimization(
+            [b_catch, b_djei, b_risk], OptimizationConfig(), custom_rules
+        )
+
+        # 1) XLSX completo (aba Otimizacao_Tempo_Roteiro)
+        res_full = self.client.post("/api/export/xlsx", json={"bar_optimization": opt_payload})
+        self.assertEqual(res_full.status_code, 200)
+        wb_full = load_workbook(io.BytesIO(res_full.content))
+        ws_full = wb_full["Otimizacao_Tempo_Roteiro"]
+        headers_full = [c.value for c in ws_full[1]]
+        self.assertEqual(headers_full, expected_headers)
+        self.assertEqual(headers_full.index("Qtd Cortes") + 1, headers_full.index("Medida (mm)"))
+
+        # 2) XLSX dedicado do roteiro (mode="otimizacao_tempo_roteiro")
+        res_ded = self.client.post(
+            "/api/export/xlsx",
+            json={"mode": "otimizacao_tempo_roteiro", "bar_optimization": opt_payload},
+        )
+        self.assertEqual(res_ded.status_code, 200)
+        self.assertIn("roteiro_corte_otimizado.xlsx", res_ded.headers.get("content-disposition", ""))
+        wb_ded = load_workbook(io.BytesIO(res_ded.content))
+        self.assertEqual(wb_ded.sheetnames, ["Otimizacao_Tempo_Roteiro"])
+        ws_ded = wb_ded["Otimizacao_Tempo_Roteiro"]
+        self.assertEqual([c.value for c in ws_ded[1]], expected_headers)
+
+        # 3) CSV do roteiro com mesmas 11 colunas na mesma ordem
+        res_csv = self.client.post(
+            "/api/export/csv",
+            json={"mode": "otimizacao_tempo_roteiro", "bar_optimization": opt_payload},
+        )
+        self.assertEqual(res_csv.status_code, 200)
+        csv_header_line = res_csv.text.lstrip("\ufeff").splitlines()[0]
+        self.assertEqual(csv_header_line.split(";"), expected_headers)
+
+        # Validação de conteúdo por grupo (5307 com CATCH+DJEI e fallback RISK — Lateral)
+        rows_by_cod = {}
+        for r in range(2, ws_ded.max_row + 1):
+            row_vals = {expected_headers[c - 1]: ws_ded.cell(row=r, column=c) for c in range(1, len(expected_headers) + 1)}
+            rows_by_cod[str(row_vals["Cód. Perfil"].value)] = row_vals
+
+        self.assertIn("5307", rows_by_cod)
+        r_5307 = rows_by_cod["5307"]
+        self.assertEqual(r_5307["Modelo"].value, "CATCH, DJEI")
+        self.assertEqual(r_5307["Cód. Perfil"].value, "5307")
+        self.assertIn("CATCH: Obs regra Catch", r_5307["Observação"].value)
+        self.assertIn("DJEI: Obs regra Djei", r_5307["Observação"].value)
+        self.assertIn("Chanfro especial", r_5307["Observação"].value)
+        self.assertIsInstance(r_5307["Qtd Cortes"].value, int)
+        self.assertEqual(r_5307["Qtd Cortes"].number_format, '0"×"')
+        self.assertEqual(r_5307["Medida (mm)"].value, 2450)
+        self.assertEqual(r_5307["Medida (mm)"].number_format, '0" mm"')
+
+        self.assertIn("RISK — Lateral", rows_by_cod)
+        r_risk = rows_by_cod["RISK — Lateral"]
+        self.assertEqual(r_risk["Modelo"].value, "RISK")
+        self.assertEqual(r_risk["Observação"].value, "Obs regra Risk")
+        self.assertAlmostEqual(float(r_risk["Medida (mm)"].value), 1200.5, places=2)
+        self.assertEqual(r_risk["Medida (mm)"].number_format, '0.##" mm"')
 
 
 if __name__ == "__main__":

@@ -18,6 +18,7 @@
     "angulo_corte_divisoria": 90,
     "perfil_simetrico_lateral": false,
     "perfil_simetrico_puxador": false,
+    "puxador_adicional_quadro_fechado": false,
     "observacao": "Quadro externo nas dimensões + divisórias internas na largura"
   },
   "CATCH": {
@@ -39,6 +40,7 @@
     "angulo_corte_divisoria": 90,
     "perfil_simetrico_lateral": false,
     "perfil_simetrico_puxador": false,
+    "puxador_adicional_quadro_fechado": false,
     "observacao": "Medidas nominais por padrão; ajustar desconto se aplicável ao perfil 5307/5317"
   },
   "PERFIL 5307": {
@@ -60,6 +62,7 @@
     "angulo_corte_divisoria": 90,
     "perfil_simetrico_lateral": false,
     "perfil_simetrico_puxador": false,
+    "puxador_adicional_quadro_fechado": false,
     "observacao": "Medidas nominais por padrão"
   },
   "DJEI": {
@@ -73,15 +76,16 @@
     "codigo_perfil_puxador": "",
     "largura_perfil_quadro_mm": 0.0,
     "largura_perfil_puxador_mm": 0.0,
-    "desconto_adjacente_puxador_mm": 0.0,
+    "desconto_adjacente_puxador_mm": 15.0,
     "desconto_vidro_lateral_mm": 5.0,
     "desconto_vidro_puxador_mm": 20.0,
     "angulo_corte_quadro": 45,
     "angulo_corte_puxador": 45,
     "angulo_corte_divisoria": 90,
-    "perfil_simetrico_lateral": false,
+    "perfil_simetrico_lateral": true,
     "perfil_simetrico_puxador": false,
-    "observacao": "Medidas nominais por padrão"
+    "puxador_adicional_quadro_fechado": false,
+    "observacao": "Puxador Cortar 15mm a mais chanfro"
   },
   "CLEAR S": {
     "modelo": "CLEAR S",
@@ -102,6 +106,7 @@
     "angulo_corte_divisoria": 90,
     "perfil_simetrico_lateral": false,
     "perfil_simetrico_puxador": false,
+    "puxador_adicional_quadro_fechado": false,
     "observacao": "Medidas nominais por padrão"
   },
   "CLEAR G": {
@@ -123,28 +128,30 @@
     "angulo_corte_divisoria": 90,
     "perfil_simetrico_lateral": false,
     "perfil_simetrico_puxador": false,
+    "puxador_adicional_quadro_fechado": false,
     "observacao": "Puxador 80mm - Quadro 45mm = 35mm descontados das peças adjacentes ao puxador"
   },
   "RISK": {
     "modelo": "RISK",
     "descricao": "Perfil Risk (Bater, Báscula, Gaveta e Correr)",
-    "tipo_corte": "45°",
+    "tipo_corte": "90° (Topo)",
     "desconto_vertical_mm": 0.0,
     "desconto_horizontal_mm": 0.0,
     "desconto_divisoria_mm": 0.0,
-    "codigo_perfil_lateral": "",
-    "codigo_perfil_puxador": "",
+    "codigo_perfil_lateral": "RISK",
+    "codigo_perfil_puxador": "RISKpx",
     "largura_perfil_quadro_mm": 0.0,
     "largura_perfil_puxador_mm": 0.0,
     "desconto_adjacente_puxador_mm": 0.0,
     "desconto_vidro_lateral_mm": 0.0,
     "desconto_vidro_puxador_mm": 0.0,
-    "angulo_corte_quadro": 45,
-    "angulo_corte_puxador": 45,
+    "angulo_corte_quadro": 90,
+    "angulo_corte_puxador": 90,
     "angulo_corte_divisoria": 90,
     "perfil_simetrico_lateral": true,
-    "perfil_simetrico_puxador": false,
-    "observacao": "Inclui Risk Usinado, Inclinado e Sem Usinagem"
+    "perfil_simetrico_puxador": true,
+    "puxador_adicional_quadro_fechado": true,
+    "observacao": "Inclui Risk Usinado, Inclinado e Sem Usinagem · Quadro fechado 45° + puxador 90° (5 pçs/porta)"
   },
   "GROOVE": {
     "modelo": "GROOVE",
@@ -165,6 +172,7 @@
     "angulo_corte_divisoria": 90,
     "perfil_simetrico_lateral": false,
     "perfil_simetrico_puxador": false,
+    "puxador_adicional_quadro_fechado": false,
     "observacao": "Medidas nominais por padrão"
   },
   "INTEIRA": {
@@ -186,6 +194,7 @@
     "angulo_corte_divisoria": 90,
     "perfil_simetrico_lateral": false,
     "perfil_simetrico_puxador": false,
+    "puxador_adicional_quadro_fechado": false,
     "observacao": "Medidas nominais por padrão"
   },
   "SINGULAR": {
@@ -207,6 +216,7 @@
     "angulo_corte_divisoria": 90,
     "perfil_simetrico_lateral": false,
     "perfil_simetrico_puxador": false,
+    "puxador_adicional_quadro_fechado": false,
     "observacao": "Com divisórias entre vãos inferior, central e superior"
   },
   "MINI KENDO + BAGUETE": {
@@ -228,6 +238,7 @@
     "angulo_corte_divisoria": 90,
     "perfil_simetrico_lateral": false,
     "perfil_simetrico_puxador": false,
+    "puxador_adicional_quadro_fechado": false,
     "observacao": "Usa diretamente as medidas de corte informadas na descrição quando disponíveis"
   },
   "OUTRO": {
@@ -249,6 +260,7 @@
     "angulo_corte_divisoria": 90,
     "perfil_simetrico_lateral": false,
     "perfil_simetrico_puxador": false,
+    "puxador_adicional_quadro_fechado": false,
     "observacao": "Regra padrão nominal"
   }
 }

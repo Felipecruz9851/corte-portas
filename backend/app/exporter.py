@@ -4,11 +4,28 @@ from __future__ import annotations
 
 import io
 import json
+import math
 from typing import Any, Dict, List, Optional
 
 import pandas as pd
-from openpyxl.styles import Alignment, Font, PatternFill
+from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
+
+from app.bar_optimizer import _collect_pieces_modelos, _collect_pieces_observacao
+
+ROTEIRO_COLUMNS = [
+    "Passo",
+    "Modelo",
+    "Cód. Perfil",
+    "Ângulos",
+    "Origem na Barra",
+    "Qtd Cortes",
+    "Medida (mm)",
+    "Sobra Antes → Depois (mm)",
+    "Ação / Cavalete",
+    "OPs",
+    "Observação",
+]
 
 
 def _flatten_items_for_table(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -103,48 +120,265 @@ def _flatten_scenario_bars(
     return rows
 
 
+def _fmt_num(val: Any) -> str:
+    if val is None or val == "":
+        return "-"
+    try:
+        n = float(val)
+    except (TypeError, ValueError):
+        return str(val)
+    if math.isnan(n):
+        return str(val)
+    if n.is_integer():
+        return str(int(n))
+    return f"{n:.2f}".rstrip("0").rstrip(".")
+
+
+def _format_roteiro_passo(step: Dict[str, Any]) -> str:
+    parts = [f"#{step.get('passo')}"]
+    if step.get("eh_drenagem"):
+        parts.append("Drenagem")
+    if step.get("troca_medida"):
+        parts.append("Troca")
+    if step.get("troca_angulo"):
+        parts.append("Troca âng.")
+    return " · ".join(parts)
+
+
+def _format_roteiro_origem(alloc: Dict[str, Any], use_global_bar: bool = False) -> str:
+    b_num = (
+        (alloc.get("barra_global_numero") or alloc.get("barra_numero"))
+        if use_global_bar
+        else (alloc.get("barra_numero") or alloc.get("barra_global_numero"))
+    )
+    if alloc.get("eh_sobra"):
+        vaga = alloc.get("vaga_cavalete")
+        if vaga:
+            return f"Sobra da Barra #{b_num} · Vaga #{vaga}"
+        return f"Sobra da Barra #{b_num}"
+    return f"Barra #{b_num} (nova)"
+
+
+def _resolve_roteiro_obs(step: Dict[str, Any], alloc: Dict[str, Any]) -> str:
+    obs = str(alloc.get("observacao") or step.get("observacao") or "").strip()
+    if obs:
+        return obs
+    return _collect_pieces_observacao(alloc.get("pecas") or [])
+
+
+def _resolve_roteiro_modelo(step: Dict[str, Any], alloc: Dict[str, Any]) -> str:
+    mod = str(alloc.get("modelo") or step.get("modelo") or "").strip()
+    if mod:
+        return mod
+    return _collect_pieces_modelos(
+        alloc.get("pecas") or [],
+        fallback_modelos=step.get("modelos") or [],
+    )
+
+
+def _resolve_roteiro_codigo_perfil(step: Dict[str, Any], alloc: Dict[str, Any]) -> str:
+    if step.get("origem_agrupamento") == "codigo_perfil" and step.get("grupo_nome"):
+        return str(step.get("grupo_nome"))
+    return str(
+        alloc.get("codigo_perfil")
+        or step.get("codigo_perfil")
+        or step.get("grupo_nome")
+        or ""
+    )
+
+
 def _flatten_tempo_roteiro(
     bar_opt: Optional[Dict[str, Any]],
 ) -> List[Dict[str, Any]]:
-    steps = (
-        (bar_opt or {})
-        .get("cenarios", {})
-        .get("tempo_execucao", {})
-        .get("roteiro_flat")
-        or []
-    )
+    tempo_scen = (bar_opt or {}).get("cenarios", {}).get("tempo_execucao", {}) or {}
+    grupos = tempo_scen.get("grupos") or []
+    ordered_steps: List[Dict[str, Any]] = []
+    if grupos:
+        for grp in sorted(grupos, key=lambda g: str(g.get("grupo_nome") or "")):
+            ordered_steps.extend(grp.get("roteiro_medidas") or [])
+    else:
+        ordered_steps = tempo_scen.get("roteiro_flat") or []
+
     rows: List[Dict[str, Any]] = []
-    for step in steps:
+    for step in ordered_steps:
+        med_val = round(float(step.get("medida_corte_mm") or 0.0), 3)
         for alloc in step.get("alocacoes") or []:
-            alloc_pcs = alloc.get("pecas") or []
-            alloc_sim = bool(alloc_pcs) and all(
-                bool(p.get("perfil_simetrico")) for p in alloc_pcs
+            sobra_str = (
+                f"{_fmt_num(alloc.get('sobra_antes_mm'))} → "
+                f"{_fmt_num(alloc.get('sobra_depois_mm'))}"
+            )
+            acao_str = str(
+                alloc.get("acao_cavalete")
+                or ("Sobra" if alloc.get("eh_sobra") else "—")
             )
             rows.append(
                 {
-                    "Grupo": step.get("grupo_nome"),
-                    "Codigo_Perfil": step.get("codigo_perfil") or "",
-                    "Perfil_Simetrico": "Sim (//)" if alloc_sim else "Não (\\/)",
-                    "Passo": step.get("passo"),
-                    "Tipo_Passo": "Drenagem cavalete" if step.get("eh_drenagem") else "Lote principal",
-                    "Troca_Medida": "Sim" if step.get("troca_medida") else "Não",
-                    "Troca_Angulo": "Sim" if step.get("troca_angulo") else "Não",
-                    "Trocas_Angulo_Passo": step.get("trocas_angulo_passo", 0),
-                    "Medida_Corte_mm": step.get("medida_corte_mm"),
-                    "Angulos_Corte": alloc.get("angulos_corte") or step.get("angulos_corte") or "",
-                    "Origem_Barra": alloc.get("origem_barra"),
-                    "Vaga_Cavalete": alloc.get("vaga_cavalete") or "",
-                    "Acao_Cavalete": alloc.get("acao_cavalete") or "",
-                    "Ocupacao_Cavalete": step.get("cavalete_ocupacao", 0),
-                    "Barra_Grupo": alloc.get("barra_numero"),
-                    "Barra_Global": alloc.get("barra_global_numero"),
-                    "Qtd_Cortes": alloc.get("qtd_cortes"),
-                    "Sobra_Antes_mm": alloc.get("sobra_antes_mm"),
-                    "Sobra_Depois_mm": alloc.get("sobra_depois_mm"),
-                    "OPs": alloc.get("ops"),
+                    "Passo": _format_roteiro_passo(step),
+                    "Modelo": _resolve_roteiro_modelo(step, alloc),
+                    "Cód. Perfil": _resolve_roteiro_codigo_perfil(step, alloc),
+                    "Ângulos": alloc.get("angulos_corte")
+                    or step.get("angulos_corte")
+                    or "45° / 45°",
+                    "Origem na Barra": _format_roteiro_origem(
+                        alloc, use_global_bar=False
+                    ),
+                    "Qtd Cortes": int(alloc.get("qtd_cortes") or 0),
+                    "Medida (mm)": med_val,
+                    "Sobra Antes → Depois (mm)": sobra_str,
+                    "Ação / Cavalete": acao_str,
+                    "OPs": alloc.get("ops") or "-",
+                    "Observação": _resolve_roteiro_obs(step, alloc),
                 }
             )
     return rows
+
+
+def _style_roteiro_sheet(ws: Any) -> None:
+    """Aplica estilização Lider Design e layout pronto para impressão ao roteiro."""
+    ws.freeze_panes = "A2"
+    if ws.max_row >= 1:
+        ws.auto_filter.ref = ws.dimensions
+
+    thin_side = Side(style="thin", color="E0E0E0")
+    cell_border = Border(
+        left=thin_side, right=thin_side, top=thin_side, bottom=thin_side
+    )
+    header_fill = PatternFill(
+        start_color="222222", end_color="222222", fill_type="solid"
+    )
+    header_font = Font(color="FFFFFF", bold=True, size=10)
+    zebra_even = PatternFill(
+        start_color="FFFFFF", end_color="FFFFFF", fill_type="solid"
+    )
+    zebra_odd = PatternFill(
+        start_color="FBFBFB", end_color="FBFBFB", fill_type="solid"
+    )
+    sobra_fill = PatternFill(
+        start_color="F5EFE8", end_color="F5EFE8", fill_type="solid"
+    )
+    nova_fill = PatternFill(
+        start_color="EDEDED", end_color="EDEDED", fill_type="solid"
+    )
+    libera_fill = PatternFill(
+        start_color="F2F2F2", end_color="F2F2F2", fill_type="solid"
+    )
+
+    if ws.max_row >= 1:
+        ws.row_dimensions[1].height = 26
+        for cell in ws[1]:
+            cell.fill = header_fill
+            cell.font = header_font
+            cell.border = cell_border
+            cell.alignment = Alignment(
+                horizontal="center", vertical="center", wrap_text=True
+            )
+
+    col_names = [ws.cell(row=1, column=i).value for i in range(1, ws.max_column + 1)]
+    col_idx_map = {name: idx for idx, name in enumerate(col_names, start=1)}
+
+    for r_idx in range(2, ws.max_row + 1):
+        row_fill = zebra_even if r_idx % 2 == 0 else zebra_odd
+        max_lines = 1
+        for c_idx in range(1, ws.max_column + 1):
+            cell = ws.cell(row=r_idx, column=c_idx)
+            col_name = col_names[c_idx - 1]
+            val = cell.value
+            val_str = str(val) if val is not None else ""
+            cell.border = cell_border
+            cell.fill = row_fill
+
+            if col_name == "Passo":
+                cell.font = Font(color="1A1A1A", bold=True, size=10)
+                cell.alignment = Alignment(
+                    horizontal="left", vertical="center", wrap_text=True
+                )
+            elif col_name == "Modelo":
+                cell.font = Font(color="222222", bold=True, size=10)
+                cell.alignment = Alignment(horizontal="center", vertical="center")
+            elif col_name == "Cód. Perfil":
+                cell.font = Font(color="8B5A2B", bold=True, size=10)
+                cell.alignment = Alignment(horizontal="center", vertical="center")
+            elif col_name == "Ângulos":
+                cell.font = Font(color="222222", size=10)
+                cell.alignment = Alignment(horizontal="center", vertical="center")
+            elif col_name == "Origem na Barra":
+                if val_str.startswith("Sobra"):
+                    cell.fill = sobra_fill
+                    cell.font = Font(color="8B5A2B", bold=True, size=10)
+                else:
+                    cell.fill = nova_fill
+                    cell.font = Font(color="1A1A1A", bold=True, size=10)
+                cell.alignment = Alignment(horizontal="left", vertical="center")
+            elif col_name == "Qtd Cortes":
+                cell.font = Font(color="1A1A1A", bold=True, size=10)
+                cell.alignment = Alignment(horizontal="right", vertical="center")
+                cell.number_format = '0"×"'
+            elif col_name == "Medida (mm)":
+                cell.font = Font(color="1A1A1A", bold=True, size=10)
+                cell.alignment = Alignment(horizontal="right", vertical="center")
+                if isinstance(val, (int, float)) and float(val).is_integer():
+                    cell.number_format = '0" mm"'
+                else:
+                    cell.number_format = '0.##" mm"'
+            elif col_name == "Sobra Antes → Depois (mm)":
+                cell.font = Font(color="444444", size=10)
+                cell.alignment = Alignment(horizontal="right", vertical="center")
+            elif col_name == "Ação / Cavalete":
+                if "Guardar" in val_str or "Manter" in val_str:
+                    cell.fill = sobra_fill
+                    cell.font = Font(color="8B5A2B", size=10)
+                elif "Fim · Libera" in val_str:
+                    cell.fill = libera_fill
+                    cell.font = Font(color="222222", size=10)
+                else:
+                    cell.font = Font(color="555555", size=10)
+                cell.alignment = Alignment(horizontal="left", vertical="center")
+            elif col_name == "OPs":
+                cell.font = Font(color="555555", size=10)
+                cell.alignment = Alignment(
+                    horizontal="left", vertical="center", wrap_text=True
+                )
+            elif col_name == "Observação":
+                cell.font = Font(color="444444", size=10)
+                cell.alignment = Alignment(
+                    horizontal="left", vertical="center", wrap_text=True
+                )
+
+            if col_name in ("Observação", "OPs", "Passo") and val_str:
+                est_width = 36 if col_name == "Observação" else 24
+                lines_est = max(
+                    1,
+                    sum(
+                        max(1, math.ceil(len(part) / est_width))
+                        for part in val_str.splitlines()
+                    ),
+                )
+                max_lines = max(max_lines, lines_est)
+
+        ws.row_dimensions[r_idx].height = max(20, min(72, max_lines * 14 + 8))
+
+    for col_idx, column_cells in enumerate(ws.columns, start=1):
+        col_name = col_names[col_idx - 1] if col_idx - 1 < len(col_names) else ""
+        max_len = max(
+            (len(str(c.value)) if c.value is not None else 0)
+            for c in column_cells
+        )
+        if col_name == "Observação":
+            width = min(max(max_len + 4, 26), 48)
+        elif col_name == "OPs":
+            width = min(max(max_len + 4, 14), 32)
+        elif col_name in ("Qtd Cortes", "Medida (mm)"):
+            width = min(max(max_len + 6, 13), 32)
+        else:
+            width = min(max(max_len + 4, 12), 32)
+        ws.column_dimensions[get_column_letter(col_idx)].width = width
+
+    ws.page_setup.orientation = ws.ORIENTATION_LANDSCAPE
+    ws.page_setup.paperSize = ws.PAPERSIZE_A4
+    ws.sheet_properties.pageSetUpPr.fitToPage = True
+    ws.page_setup.fitToWidth = 1
+    ws.page_setup.fitToHeight = 0
+    ws.print_title_rows = "1:1"
 
 
 def _flatten_scenario_comparison(
@@ -208,7 +442,9 @@ def export_to_xlsx_bytes(
     df_glass_det = pd.DataFrame(detailed_glasses or [])
     df_glass_grp = pd.DataFrame(grouped_glasses or [])
     df_opt_mat = pd.DataFrame(_flatten_scenario_bars(bar_optimization, "material"))
-    df_opt_rot = pd.DataFrame(_flatten_tempo_roteiro(bar_optimization))
+    df_opt_rot = pd.DataFrame(
+        _flatten_tempo_roteiro(bar_optimization), columns=ROTEIRO_COLUMNS
+    )
     df_opt_tmp = pd.DataFrame(_flatten_scenario_bars(bar_optimization, "tempo_execucao"))
     df_opt_cmp = pd.DataFrame(_flatten_scenario_comparison(bar_optimization))
 
@@ -232,6 +468,9 @@ def export_to_xlsx_bytes(
 
         for sheet_name in wb.sheetnames:
             ws = wb[sheet_name]
+            if sheet_name == "Otimizacao_Tempo_Roteiro":
+                _style_roteiro_sheet(ws)
+                continue
             ws.freeze_panes = "A2"
             if ws.max_row >= 1:
                 ws.auto_filter.ref = ws.dimensions
@@ -252,6 +491,22 @@ def export_to_xlsx_bytes(
     return buffer.getvalue()
 
 
+def export_roteiro_to_xlsx_bytes(
+    bar_optimization: Optional[Dict[str, Any]] = None,
+) -> bytes:
+    """Gera pasta de trabalho Excel dedicada ao roteiro de corte otimizado."""
+    df_opt_rot = pd.DataFrame(
+        _flatten_tempo_roteiro(bar_optimization), columns=ROTEIRO_COLUMNS
+    )
+    buffer = io.BytesIO()
+    with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
+        df_opt_rot.to_excel(writer, sheet_name="Otimizacao_Tempo_Roteiro", index=False)
+        _style_roteiro_sheet(writer.book["Otimizacao_Tempo_Roteiro"])
+
+    buffer.seek(0)
+    return buffer.getvalue()
+
+
 def export_to_csv_bytes(
     items: List[Dict[str, Any]],
     grouped_bars: List[Dict[str, Any]],
@@ -267,7 +522,9 @@ def export_to_csv_bytes(
     elif mode in ("otimizacao_material", "otimizacao_barras"):
         df = pd.DataFrame(_flatten_scenario_bars(bar_optimization, "material"))
     elif mode == "otimizacao_tempo_roteiro":
-        df = pd.DataFrame(_flatten_tempo_roteiro(bar_optimization))
+        df = pd.DataFrame(
+            _flatten_tempo_roteiro(bar_optimization), columns=ROTEIRO_COLUMNS
+        )
     elif mode in ("otimizacao_tempo_barras", "otimizacao_tempo"):
         df = pd.DataFrame(_flatten_scenario_bars(bar_optimization, "tempo_execucao"))
     else:

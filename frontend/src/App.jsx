@@ -466,7 +466,7 @@ export default function App() {
           onExport={handleExport}
         />
 
-        <main className="flex-1 px-4 sm:px-6 lg:px-10 py-6 lg:py-10 space-y-8 max-w-[1680px] w-full mx-auto">
+        <main className="flex-1 px-4 sm:px-6 lg:px-10 py-6 lg:py-10 space-y-8 max-w-[90%] w-full mx-auto">
           {/* Cartões de métricas */}
           <MetricsCards kpis={payload?.kpis} meta={payload?.meta} />
 

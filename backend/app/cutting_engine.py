@@ -59,6 +59,7 @@ class CuttingRule:
     angulo_corte_divisoria: int = 90
     perfil_simetrico_lateral: bool = False
     perfil_simetrico_puxador: bool = False
+    puxador_adicional_quadro_fechado: bool = False
     observacao: str = ""
 
     def to_dict(self) -> Dict[str, Any]:
@@ -121,6 +122,8 @@ class CutBar:
     medida_corte_mm: float
     tipo_corte: str
     observacao_corte: str = ""
+    observacao_regra: str = ""
+    observacao_op: str = ""
     tipo_perfil: str = "Lateral"
     angulo_esq: int = 45
     angulo_dir: int = 45
@@ -166,6 +169,10 @@ def load_rules(path: Path = RULES_FILE) -> Dict[str, CuttingRule]:
         data["perfil_simetrico_puxador"] = bool(
             data.get("perfil_simetrico_puxador", False)
         )
+        data["puxador_adicional_quadro_fechado"] = bool(
+            data.get("puxador_adicional_quadro_fechado", False)
+        )
+        data["observacao"] = str(data.get("observacao") or "")
         rules[key] = CuttingRule(**data)
     return rules
 
@@ -248,6 +255,8 @@ def compute_item_cuts(
                 medida_corte_mm=_safe_cut(nominal, desconto),
                 tipo_corte=rule.tipo_corte,
                 observacao_corte=obs,
+                observacao_regra=(rule.observacao or "").strip(),
+                observacao_op=(item.observacao or "").strip(),
                 tipo_perfil=tipo_perfil,
                 angulo_esq=_norm_angle(angulo_esq, 45),
                 angulo_dir=_norm_angle(angulo_dir, 45),
@@ -353,7 +362,70 @@ def compute_item_cuts(
     def _join_obs(*parts: str) -> str:
         return " · ".join(p for p in parts if p)
 
-    if item.qtd_puxadores == 0:
+    if rule.puxador_adicional_quadro_fechado:
+        add_bar(
+            funcao="Vertical Quadro",
+            orientacao="VERTICAL",
+            eh_puxador=False,
+            qtd=2 * fator,
+            nominal=altura,
+            desconto=rule.desconto_vertical_mm,
+            angulo_esq=aq,
+            angulo_dir=aq,
+        )
+        add_bar(
+            funcao="Horizontal Quadro",
+            orientacao="HORIZONTAL",
+            eh_puxador=False,
+            qtd=2 * fator,
+            nominal=largura,
+            desconto=rule.desconto_horizontal_mm,
+            angulo_esq=aq,
+            angulo_dir=aq,
+        )
+        if item.qtd_puxadores == 2:
+            add_bar(
+                funcao="Puxador Vertical (Dir/Esq)",
+                orientacao="VERTICAL",
+                eh_puxador=True,
+                qtd=2 * fator,
+                nominal=altura,
+                desconto=rule.desconto_vertical_mm,
+                obs=item.tipo_puxador,
+                angulo_esq=ap,
+                angulo_dir=ap,
+            )
+        elif item.qtd_puxadores == 1 and item.posicao_puxador in (
+            "SUPERIOR",
+            "HORIZONTAL (BASCULA/GAVETA)",
+        ):
+            add_bar(
+                funcao="Puxador Horizontal",
+                orientacao="HORIZONTAL",
+                eh_puxador=True,
+                qtd=1 * fator,
+                nominal=largura,
+                desconto=rule.desconto_horizontal_mm,
+                obs=item.tipo_puxador,
+                angulo_esq=ap,
+                angulo_dir=ap,
+            )
+        elif item.qtd_puxadores >= 1:
+            lado_suffix = (
+                f" ({item.lado})" if item.lado and item.lado != "N/A" else ""
+            )
+            add_bar(
+                funcao=f"Puxador Vertical{lado_suffix}",
+                orientacao="VERTICAL",
+                eh_puxador=True,
+                qtd=item.qtd_puxadores * fator,
+                nominal=altura,
+                desconto=rule.desconto_vertical_mm,
+                obs=item.tipo_puxador,
+                angulo_esq=ap,
+                angulo_dir=ap,
+            )
+    elif item.qtd_puxadores == 0:
         add_bar(
             funcao="Vertical Quadro",
             orientacao="VERTICAL",
@@ -627,7 +699,7 @@ def compute_item_glasses(
             )
         ]
 
-    if item.qtd_puxadores == 0:
+    if item.qtd_puxadores == 0 or rule.puxador_adicional_quadro_fechado:
         desc_l = round(2.0 * lat, 3)
         desc_a = round(2.0 * lat, 3)
         regra_l = "2x Lateral"

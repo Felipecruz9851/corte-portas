@@ -1,7 +1,7 @@
 ---
 modulo: "backend/app/bar_optimizer.py"
 tipo: "dominio"
-data_atualizacao: 2026-11-23
+data_atualizacao: 2026-11-25
 tags: [regras-negocio, otimizacao, barras-6m, cutting-stock, portas, serra-manual]
 ---
 
@@ -28,6 +28,7 @@ Todas as peças com `medida_corte_mm <= comprimento_barra_mm - desponte_mm` entr
   - Quando `limite_sobras_simultaneas` é `None` (padrão), aloca via First-Fit Decreasing (FFD) reaproveitando todas as barras semi-cortadas.
   - **Cavalete por Ondas com Drenagem Automática (`limite_sobras_simultaneas >= 1`):** mantém uma janela ativa (`active_rack`) com no máximo `N` barras semi-cortadas simultâneas usando **Best-Fit**; sempre que o cavalete atinge `N` barras e uma nova barra seria necessária, **pausa a abertura de novas barras e drena o cavalete** (`_drain_rack`), cortando nas sobras ativas as maiores medidas compatíveis até liberar as vagas antes de abrir a próxima onda. Barras cuja sobra não comporta nenhuma peça pendente saem imediatamente (`_retire_dead_bars`).
   - `_annotate_rack_lifecycle` anota cada alocação com `vaga_cavalete`, `proximo_passo`, `eh_fim_barra`, `acao_cavalete` (`Guardar · Vaga #K (volta #P)`, `Manter · Vaga #K (volta #P)`, `Fim · Libera Vaga #K`, `Encerrar (sem cavalete)` ou `Fim da barra`), `cavalete_ocupacao` e `eh_drenagem` por passo, além de apurar `retomadas_sobras`, `pico_sobras_simultaneas` (`<= limite_sobras_simultaneas` quando definido) e `ciclos_drenagem` (`total_ciclos_drenagem`). Quando há limite ativo, `roteiro_flat` preserva a ordem cronológica das ondas/drenagem (`(grupo_nome, passo)`).
+  - **Rastreabilidade de Modelo, Código do Perfil e Observação no Roteiro:** `CutBar` (`./backend/app/cutting_engine.py`) e `build_bar_optimization` propagam `observacao_regra`, `observacao_corte` e `observacao_op` por peça, e `_commit_step` consolida em cada alocação e passo do roteiro os campos `modelo`, `modelos`, `codigo_perfil` e `observacao` via `_collect_pieces_modelos` e `_collect_pieces_observacao` (prefixando com `<MODELO>: ...` quando múltiplas regras distintas dividem o mesmo código de perfil e deduplicando textos repetidos).
 
 ## Ângulos de Corte (`45°` / `90°`), Trocas de Ângulo e Perfil Simétrico (`//` vs `\/`)
 

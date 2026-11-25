@@ -5,6 +5,7 @@ import {
   ChevronRight,
   Clock,
   Download,
+  FileSpreadsheet,
   Filter,
   Layers,
   Loader2,
@@ -32,12 +33,16 @@ function pieceMatchesQuery(p, q) {
     p.op,
     p.codigo,
     p.modelo,
+    p.codigo_perfil,
     p.tipo_perfil,
     p.funcao_barra,
     p.acabamento_perfil,
     p.angulos_corte,
     p.tipo_corte,
     p.medida_corte_mm,
+    p.observacao_regra,
+    p.observacao_corte,
+    p.observacao_op,
   ]
     .join(" ")
     .toLowerCase()
@@ -243,6 +248,10 @@ function filterScenarioAndComputeMetrics(
           if (!q || groupHeaderMatches) return true;
           if (String(step.medida_corte_mm).toLowerCase().includes(q)) return true;
           if (String(step.angulos_corte || "").toLowerCase().includes(q)) return true;
+          if (String(step.modelo || "").toLowerCase().includes(q)) return true;
+          if (String(step.observacao || "").toLowerCase().includes(q)) return true;
+          if (String(alloc.modelo || "").toLowerCase().includes(q)) return true;
+          if (String(alloc.observacao || "").toLowerCase().includes(q)) return true;
           if ((alloc.ops || "").toLowerCase().includes(q)) return true;
           return (alloc.pecas || []).some((p) => pieceMatchesQuery(p, q));
         });
@@ -1002,6 +1011,51 @@ function BarCard({ bar, desponteMm = 0, showGroupBadge = false, isMaterial = tru
   );
 }
 
+function resolveAllocObservacao(step, alloc) {
+  const direct = String(alloc.observacao || step.observacao || "").trim();
+  if (direct) return direct;
+  const pcs = alloc.pecas || [];
+  if (!pcs.length) return "";
+  const parts = [];
+  const seenTexts = new Set();
+  const regraPairs = [];
+  const seenPairs = new Set();
+  for (const p of pcs) {
+    const obsReg = String(p.observacao_regra || "").trim();
+    if (!obsReg) continue;
+    const mod = String(p.modelo || "").trim();
+    const pairKey = `${mod}::${obsReg}`;
+    if (!seenPairs.has(pairKey)) {
+      seenPairs.add(pairKey);
+      regraPairs.push([mod, obsReg]);
+    }
+  }
+  const distinctRegraTexts = new Set(regraPairs.map(([, obs]) => obs));
+  if (distinctRegraTexts.size === 1) {
+    const onlyObs = regraPairs[0][1];
+    parts.push(onlyObs);
+    seenTexts.add(onlyObs);
+  } else if (distinctRegraTexts.size > 1) {
+    for (const [mod, obs] of regraPairs) {
+      const formatted = mod ? `${mod}: ${obs}` : obs;
+      if (!seenTexts.has(formatted)) {
+        parts.push(formatted);
+        seenTexts.add(formatted);
+      }
+    }
+  }
+  for (const field of ["observacao_corte", "observacao_op"]) {
+    for (const p of pcs) {
+      const val = String(p[field] || "").trim();
+      if (val && !seenTexts.has(val)) {
+        parts.push(val);
+        seenTexts.add(val);
+      }
+    }
+  }
+  return parts.join(" | ");
+}
+
 function ExecutionRouteTable({
   steps = [],
   showGroupCol = false,
@@ -1039,14 +1093,16 @@ function ExecutionRouteTable({
         <thead>
           <tr>
             <th className="num-header">Passo</th>
-            <th className="num-header">Medida (mm)</th>
+            <th>Modelo</th>
+            <th>Cód. Perfil</th>
             <th>Ângulos</th>
-            {showGroupCol && <th>Grupo / Cód. Perfil</th>}
             <th>Origem na Barra</th>
             <th className="num-header">Qtd Cortes</th>
+            <th className="num-header">Medida (mm)</th>
             <th className="num-header">Sobra Antes → Depois (mm)</th>
             <th>Ação / Cavalete</th>
             <th>OPs</th>
+            <th>Observação</th>
           </tr>
         </thead>
         <tbody>
@@ -1060,6 +1116,23 @@ function ExecutionRouteTable({
                 : alloc.vaga_cavalete && alloc.eh_fim_barra
                 ? "border-lider-charcoal/30 bg-lider-canvas text-lider-charcoal"
                 : "border-lider-border bg-lider-canvas/60 text-lider-muted";
+            const modeloDisplay =
+              alloc.modelo ||
+              step.modelo ||
+              Array.from(
+                new Set((alloc.pecas || []).map((p) => p.modelo).filter(Boolean))
+              )
+                .sort()
+                .join(", ") ||
+              (step.modelos || []).join(", ") ||
+              "-";
+            const isCodPerfil =
+              step.origem_agrupamento === "codigo_perfil" &&
+              Boolean(step.grupo_nome || step.codigo_perfil);
+            const codPerfilDisplay = isCodPerfil
+              ? step.grupo_nome || step.codigo_perfil
+              : alloc.codigo_perfil || step.codigo_perfil || step.grupo_nome || "-";
+            const obsDisplay = resolveAllocObservacao(step, alloc);
             return (
               <tr
                 key={`${step.grupo_key}-${step.passo}-${alloc.barra_numero}-${idx}`}
@@ -1084,31 +1157,28 @@ function ExecutionRouteTable({
                     )}
                   </div>
                 </th>
-                <td
-                  data-label="Medida (mm)"
-                  className="num font-mono font-medium text-lider-ink"
-                >
-                  {fmtNum(step.medida_corte_mm)} mm
+                <td data-label="Modelo">
+                  <span className="inline-flex items-center px-2 py-0.5 text-[11px] font-medium border border-lider-border bg-lider-canvas text-lider-charcoal rounded-[2px]">
+                    {modeloDisplay}
+                  </span>
+                </td>
+                <td data-label="Cód. Perfil">
+                  <span
+                    className={[
+                      "inline-flex items-center px-2 py-0.5 text-[11px] font-medium border rounded-[2px]",
+                      isCodPerfil
+                        ? "border-lider-wood/40 bg-lider-wood/5 text-lider-wood font-mono"
+                        : "border-lider-border bg-lider-canvas text-lider-slate",
+                    ].join(" ")}
+                  >
+                    {codPerfilDisplay}
+                  </span>
                 </td>
                 <td data-label="Ângulos" className="whitespace-nowrap">
                   <span className="inline-flex items-center px-1.5 py-0.5 font-mono text-[11px] border border-lider-border bg-lider-canvas text-lider-charcoal rounded-[2px]">
                     {alloc.angulos_corte || step.angulos_corte || "45° / 45°"}
                   </span>
                 </td>
-                {showGroupCol && (
-                  <td data-label="Grupo / Cód. Perfil">
-                    <span
-                      className={[
-                        "inline-flex items-center px-2 py-0.5 text-[11px] font-medium border rounded-[2px]",
-                        step.origem_agrupamento === "codigo_perfil"
-                          ? "border-lider-wood/40 bg-lider-wood/5 text-lider-wood font-mono"
-                          : "border-lider-border bg-lider-canvas text-lider-charcoal",
-                      ].join(" ")}
-                    >
-                      {step.grupo_nome}
-                    </span>
-                  </td>
-                )}
                 <td data-label="Origem na Barra">
                   {alloc.eh_sobra ? (
                     <span className="inline-flex items-center px-2 py-0.5 text-[11px] font-medium border border-lider-wood/40 bg-lider-wood/10 text-lider-wood rounded-[2px]">
@@ -1123,6 +1193,12 @@ function ExecutionRouteTable({
                 </td>
                 <td data-label="Qtd Cortes" className="num font-medium">
                   {alloc.qtd_cortes}×
+                </td>
+                <td
+                  data-label="Medida (mm)"
+                  className="num font-mono font-medium text-lider-ink"
+                >
+                  {fmtNum(step.medida_corte_mm)} mm
                 </td>
                 <td
                   data-label="Sobra Antes → Depois (mm)"
@@ -1142,6 +1218,12 @@ function ExecutionRouteTable({
                 </td>
                 <td data-label="OPs" className="font-mono text-xs text-lider-slate">
                   {alloc.ops || "-"}
+                </td>
+                <td
+                  data-label="Observação"
+                  className="text-xs text-lider-slate max-w-[300px]"
+                >
+                  {obsDisplay || "-"}
                 </td>
               </tr>
             );
@@ -2144,6 +2226,30 @@ export default function OptimizationTab({
                 )}
                 {onExport && (
                   <>
+                    <button
+                      type="button"
+                      disabled={!hasData || Boolean(exportingKey)}
+                      onClick={() =>
+                        onExport(
+                          "xlsx-opt-rot",
+                          "/api/export/xlsx",
+                          {
+                            mode: "otimizacao_tempo_roteiro",
+                            bar_optimization: buildFilteredExportOptimization(),
+                          },
+                          "roteiro_corte_otimizado.xlsx"
+                        )
+                      }
+                      title={
+                        hasActiveFilter
+                          ? "Exportar Roteiro Otimizado em Excel (recorte filtrado)"
+                          : "Exportar Roteiro Otimizado em Excel (.xlsx)"
+                      }
+                      className="h-9 px-3 text-xs font-medium rounded-[2px] border border-lider-charcoal bg-lider-charcoal hover:bg-lider-ink text-white inline-flex items-center gap-1.5 transition-colors disabled:opacity-45"
+                    >
+                      <FileSpreadsheet className="w-3.5 h-3.5" strokeWidth={1.5} />
+                      <span>Excel Roteiro</span>
+                    </button>
                     <button
                       type="button"
                       disabled={!hasData || Boolean(exportingKey)}

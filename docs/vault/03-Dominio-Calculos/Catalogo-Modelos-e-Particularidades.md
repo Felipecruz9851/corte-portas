@@ -1,7 +1,7 @@
 ---
 modulo: "catalogo-modelos-portas"
 tipo: "dominio"
-data_atualizacao: 2026-11-19
+data_atualizacao: 2026-11-25
 tags: [regras-negocio, catalogo, modelos, portas, particularidades]
 ---
 
@@ -13,7 +13,7 @@ tags: [regras-negocio, catalogo, modelos, portas, particularidades]
 
 ## 1. Matriz Comparativa dos 12 Modelos
 
-Snapshot fiel da configuração vigente em `./backend/app/data/regras_corte.json` (`2026-11-19`):
+Snapshot fiel da configuração vigente em `./backend/app/data/regras_corte.json` (`2026-11-25`):
 
 | Modelo | Tipo Corte | Desc. V / H / Div (mm) | Larg. Quadro / Pux. / Adj. (mm) | Vidro Lat. / Pux. (mm/lado) | Cód. Perfil (Lat / Pux) | Puxador? | Particularidade Principal |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
@@ -23,7 +23,7 @@ Snapshot fiel da configuração vigente em `./backend/app/data/regras_corte.json
 | **`DJEI`** | `45°` | `0 / 0 / 0` | `0 / 0 / 0` | **`5 / 20`** | vazio / vazio | Sim (exceto Visor / `S/PUXADOR`) | Atende portas (`5307/6817`) e Tampo/Prateleira Visor; desconto de vidro já calibrado (`5/20`) desativa fallback explícito do Visor. |
 | **`CLEAR S`** | `45°` | `0 / 0 / 0` | `0 / 0 / 0` | `0 / 0` | vazio / vazio | Condicional | Armadilha `CLEAR_S_PUXADOR` (com puxador) vs `CLEAR S/PUXADOR` (sem puxador). |
 | **`CLEAR G`** | `45°` | `0 / 0 / 0` | **`45 / 80 / 35`** | `0 / 0` | vazio / vazio | Sim | Perfil assimétrico: `-35 mm` automático nas barras perpendiculares ao puxador (`-70 mm` se duplo). |
-| **`RISK`** | `45°` | `0 / 0 / 0` | `0 / 0 / 0` | `0 / 0` | vazio / vazio | Implícito (exceto `SEM USINAGEM`/`SEM PUXADOR`) | 4 subtipos (`USINADO`, `INCLINADO`, `SEM USINAGEM`, `RISK`); fallback por prefixo ERP `2PTAG`. |
+| **`RISK`** | `45° / 90° (Misto)` | `0 / 0 / 0` | `0 / 0 / 0` | `0 / 0` | `RISK` / `RISK` | Implícito (exceto `SEM USINAGEM`/`SEM PUXADOR`) | **Quadro fechado + puxador adicional (`puxador_adicional_quadro_fechado = true`):** 4 peças no quadro (`45° / 45°`) + 1 peça de puxador (`90° / 90°`) = **5 peças/porta** (`4` se sem puxador; `6` se duplo). 4 subtipos (`USINADO`, `INCLINADO`, `SEM USINAGEM`, `RISK`) e fallback `2PTAG`. |
 | **`GROOVE`** | `45°` | `0 / 0 / 0` | `0 / 0 / 0` | `0 / 0` | vazio / vazio | Implícito em portas | Espelheira / Sistema Avante. |
 | **`INTEIRA`** | `45°` | `0 / 0 / 0` | `0 / 0 / 0` | `0 / 0` | vazio / vazio | Implícito em portas | Detectado por `CORRER INTEIRA`; frequente em Passagem Suspensa / Cascata com `PUX.SMART`. |
 | **`SINGULAR`** | `45°` | `0 / 0 / 0` | `0 / 0 / 0` | `0 / 0` | vazio / vazio | Condicional | Detectado por `CORRER SINGULAR`; divisórias geradas por `VAO INFERIOR/CENTRAL/SUPERIOR`. |
@@ -111,8 +111,13 @@ Snapshot fiel da configuração vigente em `./backend/app/data/regras_corte.json
 - **Exemplos Reais de Descrição ERP:**
   - Porta Bater 1 Puxador (`2PTNP412ZDM41`): `PORTA BATER RISK_DIREITA_LARGURA 434_ALTURA 2309_PERFIL PADRAO PRETA - FOSCA_ PLACA INCOLOR LOW IRON_FURACAO PAGINA 172`
   - Porta Correr Externa 2 Puxadores (`2PTNP7POYS1N3`): `PORTA SOFT CLOSING SI OCEAN 80_CORRER RISK_EXTERNA_C/ PUXADOR DIREITO E ESQUERDO_LARGURA 1219.333_ALTURA 2640_PERFIL PADRAO QUINOA - FOSCA_PLACA REFLETENTE BRONZE`
-- **Comportamento no Corte:**
+- **Comportamento no Corte (`puxador_adicional_quadro_fechado = true`, `tipo_corte = "45° / 90° (Misto)"`, `angulo_corte_quadro = 45`, `angulo_corte_puxador = 90`, `codigo_perfil_lateral = "RISK"`, `codigo_perfil_puxador = "RISK"`):**
   - Em portas (`PORTA DE BATER`, `PORTA DE CORRER`, `PORTA PASSAGEM / DIVISORIA`), `"RISK"` aciona puxador **implícito** mesmo sem a palavra `PUXADOR` (ex.: `2PTNP412ZDM41` acima recebe `1x LATERAL (DIREITA)`). Só vira `0` puxadores se houver token negativo (`SEM USINAGEM`, `S/PUXADOR`, `SEM PUXADOR`, etc.).
+  - **Quadro fechado + puxador adicional:** todos os itens `RISK` (Bater, Correr, Báscula, Gaveta) emitem sempre o quadro fechado de **4 peças** em `45° / 45°` (`2x Vertical Quadro` na altura + `2x Horizontal Quadro` na largura), somado às peças adicionais de puxador em `90° / 90°` com mesmo código `RISK` (otimizando junto nas mesmas barras de 6 m):
+    - `0` puxadores (`SEM PUXADOR` / `SEM USINAGEM`): **4 peças** (`2x Vertical Quadro` + `2x Horizontal Quadro`).
+    - `1` puxador: **5 peças** (`4` do quadro + `1x Puxador Vertical (<Lado>)` na altura, ou `1x Puxador Horizontal` na largura em `SUPERIOR` / `HORIZONTAL (BASCULA/GAVETA)`).
+    - `2` puxadores (`DUPLO (DIREITA E ESQUERDA)`): **6 peças** (`4` do quadro + `2x Puxador Vertical (Dir/Esq)` na altura).
+  - **Vidro / Placa:** como o quadro é fechado nos 4 lados, `compute_item_glasses()` aplica sempre **`2x Lateral`** em Largura e Altura (inclusive com 1 ou 2 puxadores).
   - Suporta medidas decimais (como `1219.333 mm` em `2PTNP7POYS1N3`), preservadas até a 3ª casa decimal em `cutting_engine.py` e convertidas para micrômetros exatos (`1219333 µm`) em `bar_optimizer.py`.
 - **Particularidades e Manutenção:**
   - Caso entre algum novo código `2PTAG...` no ERP que **não** seja `RISK`, lembre-se da regra de fallback da linha 226 em `description_parser.py` — a nova regra do modelo precisará estar no topo (antes dos fallbacks).
